@@ -6,14 +6,18 @@ that an engine boots in a container, under gVisor or under Slurm; those are GPU 
 
     python3 -m unittest discover -s rsibox -t . -v      # from core/livelab
 """
+import io
 import json
 import os
+import shlex
 import shutil
 import subprocess
 import sys
 import tempfile
 import unittest
+from contextlib import redirect_stdout
 
+from rsibox import cli
 from rsibox import client as C
 from rsibox import gvisor as G
 from rsibox import launch as L
@@ -89,6 +93,48 @@ class Plans(unittest.TestCase):
         self.assertTrue(lines[-1].startswith("exec python3 -u -m rsibox serve --lab vllm --state /shared/box1 "
                                              "--bind 0.0.0.0"), lines[-1])
         self.assertEqual(what["argv"], ["sbatch", "--parsable", "/shared/box1/rsibox.sbatch"])
+
+    def test_lab_args_passthrough_across_all_launchers_and_cli_dry_run(self):
+        engine_args = ["Qwen/Qwen3-8B", "-tp", "2", "--port", "19000", "--max-model-len", "8192", "--enable-sleep-mode"]
+        expected = shlex.join(engine_args)
+
+        # local & gvisor carry RSIBOX_LAB_ARGS in plan()["env"]
+        for launcher in ("local", "gvisor"):
+            buf = io.StringIO()
+            with redirect_stdout(buf):
+                rc = cli.main(["up", "--launcher", launcher, "--lab", "vllm", "--real",
+                               "--state", "/shared/box1", "--dry-run", "--", *engine_args])
+            self.assertEqual(rc, 0)
+            planned = json.loads(buf.getvalue())
+            self.assertEqual(planned["env"]["RSIBOX_LAB_ARGS"], expected)
+            # `--port 19000` after `--` must not be consumed by `rsibox up --port` (daemon port stays 0).
+            self.assertIn("--port", planned["argv"])
+            self.assertEqual(planned["argv"][planned["argv"].index("--port") + 1], "0")
+
+        # docker passes -e RSIBOX_LAB_ARGS=...
+        buf = io.StringIO()
+        with redirect_stdout(buf):
+            rc = cli.main(["up", "--launcher", "docker", "--image", "vllm:latest", "--lab", "vllm",
+                           "--real", "--state", "/shared/box1", "--dry-run", "--", *engine_args])
+        self.assertEqual(rc, 0)
+        docker_plan = json.loads(buf.getvalue())
+        self.assertIn(f"RSIBOX_LAB_ARGS={expected}", docker_plan["argv"])
+
+        # slurm exports RSIBOX_LAB_ARGS in the generated batch script
+        buf = io.StringIO()
+        with redirect_stdout(buf):
+            rc = cli.main(["up", "--launcher", "slurm", "--lab", "vllm", "--real",
+                           "--state", "/shared/box1", "--dry-run", "--", *engine_args])
+        self.assertEqual(rc, 0)
+        self.assertIn(f"export RSIBOX_LAB_ARGS={shlex.quote(expected)}", buf.getvalue().splitlines())
+
+        # Empty trailing `--` does not inject RSIBOX_LAB_ARGS.
+        buf = io.StringIO()
+        with redirect_stdout(buf):
+            rc = cli.main(["up", "--launcher", "local", "--lab", "vllm", "--real",
+                           "--state", "/shared/box1", "--dry-run", "--"])
+        self.assertEqual(rc, 0)
+        self.assertNotIn("RSIBOX_LAB_ARGS", json.loads(buf.getvalue())["env"])
 
 
 class GvisorSpec(unittest.TestCase):

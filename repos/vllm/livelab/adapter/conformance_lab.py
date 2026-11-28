@@ -6,7 +6,10 @@ Starts `vllm serve` through `services/engine.py start` with `RSIBOX_KERNEL_DIR`,
 `/v1/completions` (`temperature=0`, `seed=0`) on fixed prompts and returns generated texts.
 
 Environment variables (no hostnames or paths in code):
-- `RSIBOX_VLLM_MODEL` (required): model path or name served as `m`.
+- `RSIBOX_LAB_ARGS`: native `vllm serve` CLI arguments forwarded by `rsibox up ... -- <args>`
+  (positional model or `--model`/`-m`, `-tp`/`--tensor-parallel-size`, `--port`,
+  `--enable-sleep-mode`, and any additional `vllm serve` flags).
+- `RSIBOX_VLLM_MODEL` (required unless model is given in `RSIBOX_LAB_ARGS`): model path or name served as `m`.
 - `RSIBOX_VLLM_VENV`: venv root (`bin/python`, `bin/vllm`, site-packages; default `sys.prefix`).
 - `RSIBOX_VLLM_WORK`: scratch dir for logs, caches, channels and source farm (default tempdir).
 - `RSIBOX_VLLM_PORT`: live port (default `18500`; `fresh_check` uses `port + 1`).
@@ -104,6 +107,71 @@ def _check_topology(ping, tp):
     if tp is not None and (parallel.get("world") != tp
                            or parallel.get("expected") != list(range(tp))):
         raise RuntimeError(f"requested TP={tp}, adapter host reports {parallel}")
+
+
+def _parse_vllm_serve_args(tokens, *, allow_positional_model=True):
+    """Parse standard `vllm serve` CLI tokens into `(parsed, remaining_extra)`.
+
+    Extracts positional model (when `allow_positional_model=True`), `--model`/`-m`,
+    `-tp`/`--tp`/`--tensor-parallel-size`, `--port`, and `--enable-sleep-mode`, and strips
+    them from `remaining_extra` so `_start_server` never emits duplicate flags.
+    """
+    model, tp, port, enable_sleep_mode = None, None, None, False
+    extra = []
+    i, n = 0, len(tokens)
+    expect_unknown_value = False
+
+    def _take_value(flag, inline_val):
+        nonlocal i
+        if inline_val is not None:
+            return inline_val
+        if i + 1 >= n:
+            raise ValueError(f"missing value for {flag}")
+        i += 1
+        return tokens[i]
+
+    while i < n:
+        tok = tokens[i]
+        if tok == "--":
+            extra.extend(tokens[i + 1:])
+            break
+        if tok.startswith("-"):
+            opt, has_eq, inline = tok.partition("=")
+            inline_val = inline if has_eq else None
+            if opt in ("--model", "-m"):
+                model = _take_value(opt, inline_val)
+                expect_unknown_value = False
+            elif opt in ("-tp", "--tp", "--tensor-parallel-size"):
+                raw_tp = _take_value(opt, inline_val)
+                try:
+                    tp = int(raw_tp)
+                except ValueError as exc:
+                    raise ValueError(f"invalid integer for {opt}: {raw_tp!r}") from exc
+                expect_unknown_value = False
+            elif opt == "--port":
+                raw_port = _take_value(opt, inline_val)
+                try:
+                    port = int(raw_port)
+                except ValueError as exc:
+                    raise ValueError(f"invalid integer for {opt}: {raw_port!r}") from exc
+                expect_unknown_value = False
+            elif opt == "--enable-sleep-mode":
+                enable_sleep_mode = (
+                    True if inline_val is None else inline_val.strip().lower() in ("1", "true", "yes")
+                )
+                expect_unknown_value = False
+            else:
+                extra.append(tok)
+                expect_unknown_value = not has_eq
+        else:
+            if allow_positional_model and model is None and not expect_unknown_value:
+                model = tok
+            else:
+                extra.append(tok)
+            expect_unknown_value = False
+        i += 1
+
+    return {"model": model, "tp": tp, "port": port, "enable_sleep_mode": enable_sleep_mode}, extra
 
 
 def _http_post(port, path, body, timeout):
@@ -291,17 +359,57 @@ class VllmLab:
         self._backend, self._fault_txns, self._pending_inject, self._stack_files = backend, [], None, []
         if backend is not None:
             self.weights_backend, self.server, self.port, self.tp = "", None, 0, 1
+            self._tp_explicit = False
             self.base_text = dict(base_texts)
             self.bridge = HostBridge(self._ctl)
             self.session = SS.Session(self.bridge, MODULES)
             return
-        self.model = os.environ["RSIBOX_VLLM_MODEL"]
+        lab_args_env = os.environ.get("RSIBOX_LAB_ARGS")
+        lab_args_tokens = shlex.split(lab_args_env) if lab_args_env else []
+        extra_env = os.environ.get("RSIBOX_VLLM_EXTRA")
+        parsed_extra, rem_extra = (
+            _parse_vllm_serve_args(shlex.split(extra_env), allow_positional_model=False)
+            if extra_env is not None else
+            ({"model": None, "tp": None, "port": None, "enable_sleep_mode": False}, [])
+        )
+        parsed_lab, rem_lab = (
+            _parse_vllm_serve_args(lab_args_tokens, allow_positional_model=True)
+            if lab_args_tokens else
+            ({"model": None, "tp": None, "port": None, "enable_sleep_mode": False}, [])
+        )
+        model = os.environ.get("RSIBOX_VLLM_MODEL") or parsed_lab["model"] or parsed_extra["model"]
+        if not model:
+            raise KeyError("RSIBOX_VLLM_MODEL (set RSIBOX_VLLM_MODEL or pass model after `--`)")
+        self.model = model
         self.venv = os.environ.get("RSIBOX_VLLM_VENV") or sys.prefix
         self.python_bin, self.vllm_bin = os.path.join(self.venv, "bin", "python"), os.path.join(self.venv, "bin", "vllm")
         self.site = _site_packages(self.venv)
-        self.port = int(os.environ.get("RSIBOX_VLLM_PORT", "18500"))
-        self.tp = int(os.environ.get("RSIBOX_VLLM_TP", "1"))
-        self.extra = shlex.split(os.environ.get("RSIBOX_VLLM_EXTRA", DEFAULT_EXTRA))
+        if "RSIBOX_VLLM_PORT" in os.environ:
+            self.port = int(os.environ["RSIBOX_VLLM_PORT"])
+        elif parsed_lab["port"] is not None:
+            self.port = parsed_lab["port"]
+        elif parsed_extra["port"] is not None:
+            self.port = parsed_extra["port"]
+        else:
+            self.port = 18500
+        if "RSIBOX_VLLM_TP" in os.environ:
+            self.tp = int(os.environ["RSIBOX_VLLM_TP"])
+            self._tp_explicit = True
+        elif parsed_lab["tp"] is not None:
+            self.tp = parsed_lab["tp"]
+            self._tp_explicit = True
+        elif parsed_extra["tp"] is not None:
+            self.tp = parsed_extra["tp"]
+            self._tp_explicit = True
+        else:
+            self.tp = 1
+            self._tp_explicit = False
+        if enable_sleep_mode is None and "RSIBOX_VLLM_ENABLE_SLEEP_MODE" not in os.environ:
+            self.enable_sleep_mode = bool(parsed_lab["enable_sleep_mode"] or parsed_extra["enable_sleep_mode"])
+        if extra_env is None and not lab_args_tokens:
+            self.extra = shlex.split(DEFAULT_EXTRA)
+        else:
+            self.extra = [*rem_extra, *rem_lab]
         self.share_gpu = os.environ.get("RSIBOX_VLLM_SHARE_GPU", "1") != "0"
         self.weights_backend = os.environ.get("RSIBOX_VLLM_WEIGHTS_BACKEND", "").strip()
         self.gms_socket_dir = os.environ.get("RSIBOX_VLLM_GMS_SOCKET_DIR", "").strip()
@@ -511,8 +619,7 @@ class VllmLab:
                        {"model": "m", "prompt": PROMPTS[0], "max_tokens": 2, "temperature": 0.0, "seed": 0},
                        timeout=120.0)
             ping = client.send(kernel_dir, {"op": "ping"}, timeout=30.0, alive_fn=srv.alive)
-            # Older callers can still select TP through arbitrary extra serve flags.
-            _check_topology(ping, self.tp if "RSIBOX_VLLM_TP" in os.environ else None)
+            _check_topology(ping, self.tp if getattr(self, "_tp_explicit", "RSIBOX_VLLM_TP" in os.environ) else None)
         except BaseException:
             srv.stop()
             raise

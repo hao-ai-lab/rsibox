@@ -1,7 +1,7 @@
 """`rsibox` / `python3 -m rsibox`: serve a box, launch one, and call it.
 
     rsibox serve --lab SPEC|NAME [--real] --state DIR      the daemon (what launchers start)
-    rsibox up --launcher local|docker|gvisor|slurm ...     start a daemon, wait for its box file
+    rsibox up --launcher local|docker|gvisor|slurm ... [-- ENGINE_ARGS...]  start a daemon, wait for its box file
     rsibox down --state DIR
     rsibox wait | status | info | events | receipts | source MODULE
     rsibox install (--file MODULE=PATH ... | --patch FILE | --diff FILE) [--accept CHECK ...]
@@ -74,13 +74,13 @@ def _pairs(items, what):
     return out
 
 
-def _up(a):
+def _up(a, lab_args=()):
     spec = {"launcher": a.launcher, "lab": a.lab, "real": a.real, "state": a.state, "python": a.python,
             "repo": a.repo, "env": _pairs(a.env, "--env"), "bind": a.bind, "port": a.port,
             "image": a.image, "gpus": a.gpus, "runtime": a.runtime, "mounts": a.mount,
             "docker_args": a.docker_arg, "nested_runsc": a.nested_runsc, "runsc": a.runsc,
             "allow_unsupported_driver": a.allow_unsupported_driver, "sbatch_args": a.sbatch_arg,
-            "setup": a.setup}
+            "setup": a.setup, "lab_args": list(lab_args)}
     if a.launcher == "docker" and not a.image:
         raise SystemExit("rsibox up: --launcher docker needs --image")
     if a.dry_run:
@@ -236,6 +236,12 @@ def main(argv=None):
     if raw and raw[0] == "promote":
         from . import promote
         return promote.main(raw[1:])
+    up_lab_args = []
+    parse_argv = raw
+    if raw and raw[0] == "up" and "--" in raw:
+        sep = raw.index("--")
+        parse_argv = raw[:sep]
+        up_lab_args = raw[sep + 1:]
     ap = argparse.ArgumentParser(
         prog="rsibox",
         description="A live lab as a service.",
@@ -255,7 +261,11 @@ def main(argv=None):
     p.set_defaults(bind="127.0.0.1")
     p.add_argument("--busy-wait", type=float, default=5.0)
 
-    p = sub.add_parser("up", help="start a daemon with a launcher and wait for its box file")
+    p = sub.add_parser(
+        "up",
+        help="start a daemon with a launcher and wait for its box file",
+        epilog="Pass engine/lab CLI flags after '--', e.g.: rsibox up ... -- Qwen/Qwen3-8B -tp 2 --max-model-len 8192",
+    )
     lab_args(p)
     p.add_argument("--launcher", required=True, choices=("local", "docker", "gvisor", "slurm"))
     p.add_argument("--python", default=None)
@@ -316,11 +326,11 @@ def main(argv=None):
     vt.add_argument("--expected-hash", default=None, help="expected tail SHA-256 hash (requires --expected-count)")
     vt.add_argument("--json", action="store_true", help="emit machine-readable JSON summary")
 
-    a = ap.parse_args(argv)
+    a = ap.parse_args(parse_argv)
     if a.command == "serve":
         return _serve(a)
     if a.command == "up":
-        return _up(a)
+        return _up(a, up_lab_args)
     if a.command == "down":
         reply = L.down(a.state)
         print(json.dumps(reply, indent=1, default=str))

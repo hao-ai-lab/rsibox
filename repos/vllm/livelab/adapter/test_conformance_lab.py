@@ -828,5 +828,146 @@ class VllmLabMultiInstanceAndCloseTest(unittest.TestCase):
                 self.assertEqual(lab0.server.state["stops"], 1)
 
 
+class VllmLabCliPassthroughTest(unittest.TestCase):
+    """Native `vllm serve` CLI parsing from `RSIBOX_LAB_ARGS` and `RSIBOX_VLLM_EXTRA`."""
+
+    @staticmethod
+    def _clean_vllm_env(extra_env):
+        keep = {k: v for k, v in os.environ.items()
+                if not k.startswith("RSIBOX_VLLM_") and k != "RSIBOX_LAB_ARGS"}
+        keep.update(extra_env)
+        return keep
+
+    def _make_lab(self, tmp, env_overrides):
+        site = VllmLabMultiInstanceAndCloseTest._make_fake_site(tmp)
+        started = []
+        env = self._clean_vllm_env({"RSIBOX_VLLM_WORK": os.path.join(tmp, "w"), **env_overrides})
+        with (mock.patch.object(CL, "_site_packages", return_value=site),
+              mock.patch.object(CL.VllmLab, "_start_server", VllmLabMultiInstanceAndCloseTest._make_stub_start(started)),
+              mock.patch.dict(os.environ, env, clear=True)):
+            lab = CL.VllmLab(shared=False)
+        self.addCleanup(lab.close)
+        return lab
+
+    def test_rsibox_lab_args_positional_model_tp_port_sleep_and_extra(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            lab = self._make_lab(tmp, {
+                "RSIBOX_LAB_ARGS": (
+                    "Qwen/Qwen3-8B -tp 2 --port 19123 --max-model-len 8192 "
+                    "--gpu-memory-utilization 0.85 --enable-sleep-mode"
+                ),
+            })
+            self.assertEqual(lab.model, "Qwen/Qwen3-8B")
+            self.assertEqual(lab.tp, 2)
+            self.assertTrue(lab._tp_explicit)
+            self.assertEqual(lab.port, 19123)
+            self.assertTrue(lab.enable_sleep_mode)
+            self.assertEqual(lab.extra, ["--max-model-len", "8192", "--gpu-memory-utilization", "0.85"])
+
+    def test_rsibox_lab_args_flag_model_and_equals_syntax(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            lab = self._make_lab(tmp, {
+                "RSIBOX_LAB_ARGS": (
+                    "--model=Qwen/Qwen3-8B --tensor-parallel-size=4 --port=19200 --max-num-seqs 64"
+                ),
+            })
+            self.assertEqual(lab.model, "Qwen/Qwen3-8B")
+            self.assertEqual(lab.tp, 4)
+            self.assertEqual(lab.port, 19200)
+            self.assertFalse(lab.enable_sleep_mode)
+            self.assertEqual(lab.extra, ["--max-num-seqs", "64"])
+
+        with tempfile.TemporaryDirectory() as tmp:
+            lab_short = self._make_lab(tmp, {
+                "RSIBOX_LAB_ARGS": "-m /models/local-qwen --enforce-eager",
+            })
+            self.assertEqual(lab_short.model, "/models/local-qwen")
+            self.assertEqual(lab_short.tp, 1)
+            self.assertFalse(lab_short._tp_explicit)
+            self.assertEqual(lab_short.port, 18500)
+            self.assertEqual(lab_short.extra, ["--enforce-eager"])
+
+    def test_backwards_compat_with_rsibox_vllm_env_vars_and_precedence(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            lab_default = self._make_lab(tmp, {"RSIBOX_VLLM_MODEL": "/models/m"})
+            self.assertEqual(lab_default.model, "/models/m")
+            self.assertEqual(lab_default.tp, 1)
+            self.assertEqual(lab_default.port, 18500)
+            self.assertFalse(lab_default.enable_sleep_mode)
+            self.assertEqual(lab_default.extra, CL.shlex.split(CL.DEFAULT_EXTRA))
+
+        with tempfile.TemporaryDirectory() as tmp:
+            lab_override = self._make_lab(tmp, {
+                "RSIBOX_VLLM_MODEL": "env-model",
+                "RSIBOX_VLLM_TP": "4",
+                "RSIBOX_VLLM_PORT": "19999",
+                "RSIBOX_VLLM_ENABLE_SLEEP_MODE": "0",
+                "RSIBOX_LAB_ARGS": "cli-model -tp 2 --port 19000 --enable-sleep-mode --max-model-len 4096",
+            })
+            self.assertEqual(lab_override.model, "env-model")
+            self.assertEqual(lab_override.tp, 4)
+            self.assertEqual(lab_override.port, 19999)
+            self.assertFalse(lab_override.enable_sleep_mode)
+            self.assertEqual(lab_override.extra, ["--max-model-len", "4096"])
+
+    def test_tp_in_rsibox_vllm_extra_updates_tp_without_duplicating_flag(self):
+        for extra_val in (
+            "--tensor-parallel-size 2 --max-model-len 4096",
+            "-tp 2 --max-model-len 4096 --port 19333 --enable-sleep-mode",
+        ):
+            with tempfile.TemporaryDirectory() as tmp:
+                lab = self._make_lab(tmp, {
+                    "RSIBOX_VLLM_MODEL": "Qwen/Qwen3-8B",
+                    "RSIBOX_VLLM_EXTRA": extra_val,
+                })
+                self.assertEqual(lab.tp, 2)
+                self.assertTrue(lab._tp_explicit)
+                self.assertEqual(lab.extra, ["--max-model-len", "4096"])
+                if "--port" in extra_val:
+                    self.assertEqual(lab.port, 19333)
+                    self.assertTrue(lab.enable_sleep_mode)
+
+    def test_start_server_emits_no_duplicate_flags_and_sets_dev_mode(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            lab = self._make_lab(tmp, {
+                "RSIBOX_LAB_ARGS": "Qwen/Qwen3-8B -tp 2 --port 19400 --max-model-len 8192 --enable-sleep-mode",
+            })
+            captured = {}
+
+            def _fake_run(cmd, capture_output, text, env, timeout):
+                captured["cmd"] = list(cmd)
+                captured["env"] = dict(env)
+                return NS(returncode=0, stdout='{"healthy_after_s": 0.1, "pid": 42424}\n', stderr="")
+
+            with (mock.patch.object(CL.subprocess, "run", side_effect=_fake_run),
+                  mock.patch.object(CL.engine, "load_engine_state", return_value={}),
+                  mock.patch.object(CL.engine, "_start_time", return_value=1),
+                  mock.patch.object(CL, "_http_post", return_value={"choices": [{"text": "ok"}]}),
+                  mock.patch.object(CL.client, "send", return_value={
+                      "ok": True, "parallel": {"world": 2, "expected": [0, 1]},
+                  })):
+                srv = lab._start_server(lab.port, "live", use_farm=False)
+
+            self.assertEqual(srv.port, 19400)
+            self.assertEqual(captured["env"].get("VLLM_SERVER_DEV_MODE"), "1")
+            serve_tail = captured["cmd"][captured["cmd"].index("--") + 1:]
+            self.assertEqual(serve_tail[0], "Qwen/Qwen3-8B")
+            self.assertEqual(serve_tail.count("-tp") + serve_tail.count("--tensor-parallel-size"), 1)
+            self.assertEqual(serve_tail[serve_tail.index("-tp") + 1], "2")
+            self.assertEqual(serve_tail.count("--port"), 1)
+            self.assertEqual(serve_tail[serve_tail.index("--port") + 1], "19400")
+            self.assertEqual(serve_tail.count("--enable-sleep-mode"), 1)
+            self.assertEqual(serve_tail.count("--model") + serve_tail.count("-m"), 0)
+            self.assertIn("--max-model-len", serve_tail)
+
+    def test_missing_model_and_invalid_int_raise_clear_errors(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            with self.assertRaises(KeyError):
+                self._make_lab(tmp, {"RSIBOX_LAB_ARGS": "-tp 2 --max-model-len 4096"})
+        with tempfile.TemporaryDirectory() as tmp:
+            with self.assertRaisesRegex(ValueError, "invalid integer"):
+                self._make_lab(tmp, {"RSIBOX_LAB_ARGS": "Qwen/Qwen3-8B -tp notanint"})
+
+
 if __name__ == "__main__":
     unittest.main()
