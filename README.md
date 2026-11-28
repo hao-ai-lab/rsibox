@@ -14,11 +14,11 @@
 </p>
 
 <p align="center">
-  <a href="#why-rsibox"><b>Why RSIBox</b></a> ·
+  <a href="#who-should-use-rsibox"><b>Who Should Use RSIBox</b></a> ·
   <a href="#how-it-works"><b>How It Works</b></a> ·
   <a href="#supported-engines--results"><b>Engines &amp; Results</b></a> ·
   <a href="#quick-start"><b>Quick Start</b></a> ·
-  <a href="#roadmap--documentation-map"><b>Roadmap &amp; Docs</b></a> ·
+  <a href="#next-steps--road-map"><b>Roadmap &amp; Docs</b></a> ·
   <a href="https://github.com/hao-ai-lab"><b>Hao AI Lab</b></a>
 </p>
 

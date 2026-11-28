@@ -78,4 +78,4 @@ Run `rsibox conformance <engine> --real -- --help` to inspect engine-specific fl
 
 - **[`docs/concepts.md`](concepts.md)** — Hot-reload layers, live execution checks (`witness`), journaled rollback, and restart boundaries.
 - **[`docs/engines.md`](engines.md)** — Supported ML engines, measured speedups, and repository layout.
-- **[`core/agents/livelab_overview.md`](../core/agents/livelab_overview.md)** — Coding-agent skill reference (installable as `~/.claude/skills/rsibox/SKILL.md`; see [`README.md`](../README.md#use-with-your-coding-agent)).
+- **[`core/agents/livelab_overview.md`](../core/agents/livelab_overview.md)** — Coding-agent skill reference (installable as `~/.claude/skills/rsibox/SKILL.md`; see [`README.md`](../README.md#agent-native-starting)).
