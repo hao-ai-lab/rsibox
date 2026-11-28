@@ -25,11 +25,7 @@
 `rsibox` adds safe live hot-reload and multi-agent GPU sharing to existing ML serving, training, and RL engines without rewriting them from scratch. Instead of paying a multi-minute cold restart on every edit to reload weights and recapture CUDA graphs, coding agents swap Python, Triton kernels, CUDA graphs, and C++/CUDA directly into the warm running engine — with execution proof and instant bit-exact rollback.
 
 <p align="center">
-  <picture>
-    <source media="(prefers-color-scheme: dark)" srcset="assets/rsibox-dynamo-4bar-dark.png">
-    <source media="(prefers-color-scheme: light)" srcset="assets/rsibox-dynamo-4bar-light.png">
-    <img alt="RSIBox live hot-reload and NVIDIA Dynamo GMS and Snapshot latency comparison on NVIDIA B200" src="assets/rsibox-dynamo-4bar-light.png" width="100%">
-  </picture>
+  <img alt="Across six AI systems, testing one edit drops from minutes to seconds with RSIBox" src="assets/rsibox-cross-engine-hero.png" width="100%">
 </p>
 
 ## Why RSIBox
