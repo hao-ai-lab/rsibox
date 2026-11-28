@@ -24,50 +24,102 @@
 
 
 
+
 RSIBox provides live hot-reload and multi-agent GPU sharing for RSI workloads on AI infra. 
 Today, an agent optimizing a production-grade ML engine must sit through minutes of cold restart for even a one-line change. 
 RSIBox eliminates this bottleneck while keeping shared GPU state safe and isolated. 
 Agents hot-swap Python code, Triton/C++/CUDA kernels, and CUDA graphs directly into a warm engine, with live execution checks, instant rollback, and crash recovery in seconds.
 On vLLM, this cuts edit turnaround from 228 s down to as low as ~100 ms across most of the codebase.
 
-RSIBox works out of the box with existing serving (vLLM, SGLang), training (Megatron-LM), and RL (veRL, Miles) engines. We also provide a set of agents to (toolsmiths) to transfer existing codebase into live-editable ones without intrusive code changes. 
+RSIBox works out of the box with existing serving (vLLM, SGLang), training (Megatron-LM), and RL (veRL, Miles) engines. You can deploy RSIBox locally or on Docker, gVisor (runsc), and Slurm, and drive it from any coding agent over an authenticated HTTP API. 
+We also provide a set of agents to (toolsmiths) to transfer existing codebase into live-editable ones without intrusive code changes. 
+
+
 
 ## Quick Start
 
-Requires Python 3.11+ (CPU-only, zero third-party dependencies for core and toy labs):
+### Agent-Native Starting
+
+```text
+Install https://github.com/hao-ai-lab/rsibox.git 
+and read core/agents/livelab_overview.md.
+
+Whenever you edit / benchmark / profile an ML engine, 
+use rsibox to hot-reload and verify changes in-place instead of restarting.
+```
+
+**Or install it as a reusable agent skill** ([`core/agents/livelab_overview.md`](core/agents/livelab_overview.md) already ships with `SKILL.md` frontmatter):
+
+```bash
+git clone https://github.com/hao-ai-lab/rsibox.git
+mkdir -p ~/.claude/skills/rsibox 
+ln -sf "$(pwd)/rsibox/core/agents/livelab_overview.md" ~/.claude/skills/rsibox/SKILL.md
+```
+
+### Manual
+
+Requires Python 3.11+ and an active GPU engine environment (e.g., `vllm`, `sglang`, `megatron`, `verl`, or `miles`):
 
 ```bash
 git clone https://github.com/hao-ai-lab/rsibox.git && cd rsibox
-python3 -m venv .venv && . .venv/bin/activate && pip install -e .
-
-# 1. Start a live sandbox and wait until warm
-rsibox up --launcher local --lab toy --state /tmp/rsibox-toy
-export RSIBOX=/tmp/rsibox-toy/box.json
-rsibox wait
-
-# 2. Fetch live source, edit 1 line, hot-reload, verify, and roll back
-rsibox source toy.ops > /tmp/ops.py
-sed -i.bak 's/return x + 1/return x + 100/' /tmp/ops.py
-rsibox install --file toy.ops=/tmp/ops.py
-rsibox check          # proves the edited function ran and shows the new output
-rsibox uninstall      # instant journaled rollback to base
-rsibox down --state /tmp/rsibox-toy
+pip install -e .
 ```
 
-For real GPU engines (local, Docker, gVisor, or Slurm), pass `--real` and see [`core/livelab/rsibox/README.md`](core/livelab/rsibox/README.md) or `rsibox conformance <engine> --real -- --help`:
+**1. Start a warm vLLM engine** (pick your launcher):
 
 ```bash
-rsibox up --launcher local --lab vllm --real --state /tmp/rsibox-vllm \
-  --env RSIBOX_VLLM_MODEL=Qwen/Qwen3-8B
+# Local (process-native)
+CUDA_VISIBLE_DEVICES=0 rsibox up --launcher local --lab vllm --real \
+  --state /tmp/rsibox-vllm --env RSIBOX_VLLM_MODEL=Qwen/Qwen3-8B
+
+# Docker (container isolation; add `--runtime runsc` for gVisor)
+rsibox up --launcher docker --image <vllm-image> --gpus device=0 \
+  --lab vllm --real --state /tmp/rsibox-vllm --env RSIBOX_VLLM_MODEL=Qwen/Qwen3-8B
+
+# Standalone gVisor (`runsc` + `nvproxy` GPU passthrough)
+CUDA_VISIBLE_DEVICES=0 rsibox up --launcher gvisor --lab vllm --real \
+  --state /tmp/rsibox-vllm --env RSIBOX_VLLM_MODEL=Qwen/Qwen3-8B
+
+# Slurm (`sbatch` job on shared filesystem)
+rsibox up --launcher slurm --lab vllm --real --state /shared/rsibox-vllm \
+  --sbatch-arg=--gres=gpu:1 --env RSIBOX_VLLM_MODEL=Qwen/Qwen3-8B
 ```
 
+**2. Wait until warm, then hot-reload, verify, and roll back in place:**
 
-## Why RSIBox
+```bash
+export RSIBOX=/tmp/rsibox-vllm/box.json
+rsibox wait
 
-- **Every small edit forces a multi-minute cold restart:** Changing one scheduling line or kernel in a running ML engine normally tears down the worker, reloads tens of gigabytes of weights, and re-captures CUDA graphs (`66–298 s` per iteration).
-- **Silent no-ops & stale CUDA graphs mislead optimization loops:** Naively monkey-patching Python fails silently when code never executes (`zero_witness`), or when `@triton.jit` binaries and captured `CUDAGraph` nodes continue replaying stale device pointers.
-- **Concurrent agents contend & poison shared GPUs:** Running multiple coding agents against a fixed GPU budget serializes teams behind full restarts and lets one crashing edit stall or poison sibling workers.
-- **Teams shouldn't have to rewrite production engines to get safe live iteration:** Engine teams need a drop-in runtime boundary (`install`, `check`, `reset`, `uninstall`, `status`) that composes with existing engines, launchers, and recovery backends like NVIDIA Dynamo GMS & Snapshot.
+rsibox source vllm.v1.worker.gpu.sample.sampler > /tmp/sampler.py
+# ... edit a function in /tmp/sampler.py ...
+rsibox install --file vllm.v1.worker.gpu.sample.sampler=/tmp/sampler.py
+rsibox check          # verifies the edited path executed + output parity
+rsibox uninstall      # instant journaled rollback to base
+rsibox down --state /tmp/rsibox-vllm
+```
+
+See [`core/livelab/rsibox/README.md`](core/livelab/rsibox/README.md) for launcher flags (`--mount`, `--dry-run`, `--setup`), or [`docs/quickstart.md`](docs/quickstart.md) for a 30-second CPU-only walkthrough.
+
+
+## Update
+- [2026/11/27] Released RSIBox v0.0.2 🎉
+- [2026/11/24] Integrated [NVIDIA Dynamo Snapshot](https://github.com/ai-dynamo/snapshot) for fast warm recovery via `cuda-checkpoint`
+- [2026/11/16] Added SGLang, veRL, and Miles live-editable adapters.
+- [2026/11/10] Open-sourced RSIBox v0.0.1 🎉
+- [2026/11/08] Added Megatron-LM and FastVideo support. 
+- [2026/11/06] Added vLLM live hot-reload kernel and adapter. Add the RSIBox agents (toolsmiths) and knowledge base. 
+
+
+## Who Should Use RSIBox?
+
+- **Engineers iterating on production ML engines:** If you're repeatedly testing small scheduling, model, or kernel edits in a real system, RSIBox replaces multi-minute restarts with selective live updates (Python, Triton, CUDA graphs, and C++/CUDA) in milliseconds to seconds, with live execution checks so stale graphs or silent no-ops never fool your benchmarks.
+- **Teams running autonomous coding agents:** RSIBox give agents a set of standard API to edit-and-verify safely (`install`, `check`, `reset`, `uninstall`). At failure, RSIBox can rollback or recovery from crash depending on what failed.
+- **Multi-agent workflows sharing one GPU sandbox:** Run concurrent agents against warm GPUs without letting full restarts serialize the team or letting one bad edit crash or poison sibling workers.
+- **Infra teams running battle-tested production forks:** Real production engines carry years of in-house logic and continuous upstream merges—you can't throw them away for a greenfield rewrite just to get fast iteration. RSIBox provides a non-intrusive entry point over your existing codebase, along with **Toolsmith** agents to onboard and continuously improve live-editability without invasive source changes.
+
+
+RSIBox is currently not built for: large, sweeping codebase refactors (such as reorganizing module layouts, changing distributed parallelism topologies, or altering weight/KV-cache schemas). Those structural changes invalidate shared read-only GPU state and still require a clean restart—RSIBox detects those boundaries and fails closed rather than silently corrupting a warm worker.
 
 ## How It Works
 
@@ -145,21 +197,6 @@ See [`docs/mechanisms.md`](docs/mechanisms.md) for all restart boundaries and CP
 
 </details>
 
-## Use with Your Coding Agent
-
-*Paste this prompt into Claude Code, Codex, Cursor, or Antigravity — zero manual setup:*
-
-```text
-Install https://github.com/hao-ai-lab/rsibox.git and read core/agents/livelab_overview.md.
-Whenever we edit or benchmark an ML engine, use rsibox to hot-reload and verify changes in-place instead of restarting.
-```
-
-**Or install it as a reusable agent skill** ([`core/agents/livelab_overview.md`](core/agents/livelab_overview.md) already ships with `SKILL.md` frontmatter):
-
-```bash
-git clone https://github.com/hao-ai-lab/rsibox.git
-mkdir -p ~/.claude/skills/rsibox && ln -sf "$(pwd)/rsibox/core/agents/livelab_overview.md" ~/.claude/skills/rsibox/SKILL.md
-```
 
 
 
