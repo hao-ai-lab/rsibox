@@ -5,8 +5,8 @@ waits for `<state>/box.json`, and records how it was started in `<state>/launch.
 `down(state)` closes the box and removes what `up` started.
 
 `spec` keys: `launcher` (local | docker | gvisor | slurm), `lab`, `real`, `state`, and the
-optional `python`, `repo`, `env` ({name: value}), `bind`, `port`, `busy_wait`, `image`,
-`gpus`, `runtime`, `mounts`, `docker_args`, `nested_runsc`, `runsc`,
+optional `python`, `repo`, `env` ({name: value}), `lab_args` (list[str] | str), `bind`, `port`,
+`busy_wait`, `image`, `gpus`, `runtime`, `mounts`, `docker_args`, `nested_runsc`, `runsc`,
 `allow_unsupported_driver`, `sbatch_args`, `setup`.
 """
 import json
@@ -50,6 +50,11 @@ def plan(spec):
     """What `up` would run: `{"argv", "env", "script"}` (script: the sbatch file, else None)."""
     kind, state = spec["launcher"], os.path.abspath(spec["state"])
     env, script = dict(spec.get("env") or {}), None
+    lab_args = spec.get("lab_args")
+    if lab_args:
+        lab_args_str = lab_args if isinstance(lab_args, str) else shlex.join(str(a) for a in lab_args)
+        if lab_args_str:
+            env["RSIBOX_LAB_ARGS"] = lab_args_str
     if kind in ("local", "gvisor", "slurm"):
         python = spec.get("python") or sys.executable
         env["PYTHONPATH"] = os.pathsep.join(
