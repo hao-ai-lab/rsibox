@@ -1,6 +1,6 @@
 name: Publish the website to GitHub Pages
 
-# Publishes site/deck/ (the interactive RSIBox website) to https://hao-ai-lab.github.io/rsibox/.
+# Publishes site/deck/ (the interactive RSIBox website) to https://haoailab.com/rsibox/.
 
 on:
   push:

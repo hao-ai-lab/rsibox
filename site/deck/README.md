@@ -33,8 +33,8 @@ Baseline), taken from the race records the blog figure was drawn from.
 ## Deploy
 
 `.github/workflows/pages.yml` publishes this folder to the repository's GitHub Pages site,
-<https://hao-ai-lab.github.io/rsibox/>, on every push to `main` that touches `site/deck/` or its
-data. The repository's Pages source is "GitHub Actions". There is no custom domain. Paths in the
+<https://haoailab.com/rsibox/>, on every push to `main` that touches `site/deck/` or its
+data. The repository's Pages source is "GitHub Actions". The org site’s domain applies, so the page lives at `haoailab.com/rsibox/`; this repository sets no domain of its own. Paths in the
 site are relative, so it works under the `/rsibox/` prefix and from a local static server.
 
 ## Rules
