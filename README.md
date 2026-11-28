@@ -208,7 +208,8 @@ On `Megatron-LM`, an autonomous agent ran an **82-iteration** live hill-climb wi
 | **`Transformers`** | Inference | Persistent worker multi-module swaps, pinned-CPU weight quiesce/resume | 7.75 s | 0.61 s | **12.8×** |
 | **`TorchTitan`** | Training (FSDP2) | PyTorch FSDP2 (1 & 2 GPU NCCL), state & RNG reset | 2.69 ~ 5.52 s | 0.08 ~ 0.26 s | **up to 32.5×** |
 | **`NeMo-RL`** | RL Post-Training | AutoModel FSDP2 + SGLang GRPO (1×/2× B200 Ray actors + coupled state reset) | 151.5 ~ 186.8 s | 19.0 ~ 34.7 s | **up to 9.8×** |
-
+| **`Kernel` (Triton / CUDA)** | Kernel Dev | Standalone `@triton.jit` & `.cu` live-edit + region-granular GPU exclusivity | 2.96 ~ 4.64 s | 0.04 ~ 0.95 s | **up to 116×** |
+| **`Isaac Lab`** | Robotics Sim | GPU physics/RL sim live swaps (`4096` envs) | 6.79 ~ 9.66 s | 0.30 ~ 0.40 s | **up to 24×** |
 </details>
 
 
@@ -223,13 +224,19 @@ On `Megatron-LM`, an autonomous agent ran an **82-iteration** live hill-climb wi
 - **[`core/livelab/conformance/README.md`](core/livelab/conformance/README.md)** — The sandbox verification suite (`rsibox conformance`) and CPU toy lab guide.
 - **[`CONTRIBUTING.md`](CONTRIBUTING.md)** & **[`.agents/plugins/rstack/README.md`](.agents/plugins/rstack/README.md)** — Contributor guidelines and deterministic `rstack` workflow gates.
 
-## Roadmap & Documentation Map
+## Next Steps & Road map
 
-| Milestone | Status | Scope |
-| :--- | :---: | :--- |
-| **v0** | ✅ Done | Core hot-reload runtime (`install` / `check` / `reset` / `uninstall` / `status`), 10 engine adapters, TLA+ formal suite (`SwapLifecycle`, `Coordinator`, `SandboxPool`, `StandbyShadow`, `PoolAutoScaler`) |
-| **v1** | ✅ Done | NVIDIA Dynamo GMS & Snapshot recovery ([`rsibox.warm`](core/livelab/rsibox/warm/README.md)), `SandboxPool` multi-agent resilience (`114/114` verified traces), in-repo `rstack` gates |
-| **v2** | 🚧 Roadmap | `NeMo-RL` post-fix `11/11` `--real` conformance (`#325`) & `TorchTitan` Llama3, `Tier-A` `cuGraphExecKernelNodeSetParams` generalization, NVIDIA Dynamo & Omni engine onboarding |
+- 👀 Robust integration of multi-tenant GPU sharing in modern serverless / microvm frameworks (preview `SandboxPool` for sandbox-level concurrency control)
+- 🚧 Zero-recapture CUDA graph patching: Generalizing in-place kernel parameter updates inside live CUDA graphs without recapture.
+- 🚧 Cluster & Kubernetes deployment: Native Kubernetes launcher (`--launcher k8s`) and multi-node warm recovery for training & RL.
+- 🚧 Agent knowledge base & Toolsmith refactor: Reorganized per-engine knowledge bases and streamlined Toolsmith onboarding workflows.
+- 🚧 Robotics & scientific domains: Deeper live-edit support for Isaac Lab and other non-LLM GPU simulation stacks.
+
+👀 = in preview, 🚧 = in progress, 💭 = just an idea
+
+<!-- - 👀 Standalone kernel platform (`KernelLab`): Live-editing and isolated benchmarking for `@triton.jit` and `.cu` kernels. -->
+<!-- - 👀 Expanded engine coverage: Construct adapters for `TRT-LLM`, `Transformers`, `TorchTitan`, `NeMo-RL`, `vLLM-Omni`, `SGLang-Omni`, `NVIDIA Dynamo`, and `Isaac Lab`.  -->
+<!-- :** Concurrent coding agents sharing warm GPUs with per-agent fault isolation and region-granular GPU exclusivity.  -->
 
 
 ## Contributors
