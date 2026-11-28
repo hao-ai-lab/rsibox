@@ -1,0 +1,1756 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<title>RSIBox: keep the weights warm</title>
+<meta name="description" content="RSIBox is a live hot-reload sandbox and multi-agent GPU pool for production ML engines. Agents edit vLLM, SGLang, Megatron-LM and more without restarting.">
+<meta property="og:type" content="website">
+<meta property="og:title" content="RSIBox: keep the weights warm">
+<meta property="og:description" content="Live hot-reload and multi-agent GPU sharing for production ML engines. Edits land in milliseconds, not minutes.">
+<meta name="theme-color" content="#0B1520">
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='10 14 200 208'%3E%3Cpolygon points='110,68 206,116 110,164 14,116' fill='%231E293B'/%3E%3Cpolygon points='110,18 164,45 110,72 56,45' fill='%23FB923C'/%3E%3Cpolygon points='56,45 110,72 110,126 56,99' fill='%23EA580C'/%3E%3Cpolygon points='164,45 110,72 110,126 164,99' fill='%23F97316'/%3E%3Cpolygon points='14,116 110,164 110,218 14,170' fill='%23334155'/%3E%3Cpolygon points='206,116 110,164 110,218 206,170' fill='%2364748B'/%3E%3C/svg%3E">
+<script>document.documentElement.classList.add('js')</script>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Geist:wght@300..800&family=Geist+Mono:wght@400..600&family=Inter:wght@400..750&display=swap">
+<link rel="stylesheet" href="fig.css">
+<script src="fig.js" defer></script>
+<style>
+/* Layout: a thermal-camera stage. Full-bleed slides float over a live heat field whose temperature follows the story
+   (cold restarts = frost blue, live edits = molten orange). Content is left-aligned on a wide grid; chrome is pinned to the edges. */
+:root{
+  color-scheme: dark;
+  --ink:#0B1520; --ink-2:#111D2A; --ink-3:#182839; --line:#26394E;
+  --paper:#E9EEF2; --fog:#9AACBE; --dim:#7489A0;
+  --frost:#7CC8F5; --frost-deep:#2A6F9E;
+  --ember:#FB923C; --molten:#F97316; --core:#FFC27A; --flare:#FFF2E2;
+  --fault:#F2607E;
+  --f-display:'Geist','Helvetica Neue',Arial,system-ui,sans-serif;
+  --f-body:'Geist','Helvetica Neue',Arial,system-ui,sans-serif;
+  --f-mono:'Geist Mono',ui-monospace,'SF Mono',Menlo,Consolas,monospace;
+  --ease-out:cubic-bezier(.16,1,.3,1);
+}
+*{box-sizing:border-box}
+html{scroll-behavior:smooth;background:var(--ink)}
+body{margin:0;background:var(--ink);color:var(--paper);font:400 16px/1.5 var(--f-body);overflow-x:hidden;-webkit-font-smoothing:antialiased}
+img{max-width:100%}
+[hidden]{display:none!important}
+button{font:inherit;color:inherit}
+::selection{background:var(--molten);color:var(--ink)}
+:focus-visible{outline:2px solid var(--core);outline-offset:3px}
+
+/* ---------- ambient heat field ---------- */
+#heat{position:fixed;inset:0;width:100%;height:100%;z-index:0;pointer-events:none;opacity:.92}
+.vignette{position:fixed;inset:0;z-index:0;pointer-events:none;
+  background:radial-gradient(130% 95% at 55% 45%,rgba(11,21,32,0) 30%,rgba(11,21,32,.82) 100%),
+             repeating-linear-gradient(0deg,rgba(233,238,242,.022) 0 1px,rgba(0,0,0,0) 1px 3px)}
+/* ---------- site header ---------- */
+.site-head{position:fixed;top:0;left:0;right:0;z-index:20;display:flex;align-items:center;gap:clamp(12px,2.4vw,36px);
+  padding:calc(env(safe-area-inset-top,0px) + 12px) max(16px,env(safe-area-inset-right,0px)) 12px max(16px,env(safe-area-inset-left,0px));
+  background:rgba(11,21,32,.72);backdrop-filter:blur(14px) saturate(1.2);-webkit-backdrop-filter:blur(14px) saturate(1.2);border-bottom:1px solid rgba(38,57,78,.7)}
+.mark{display:flex;gap:9px;align-items:center;color:var(--paper);text-decoration:none;flex:none}
+.mark>span:last-child{font:800 19px/1 var(--f-display);letter-spacing:-.02em}
+.mark .rsi{color:var(--molten)}.mark .bx{color:#8B9DB1}
+.mark svg{width:30px;height:30px}
+.site-nav{display:flex;gap:4px;flex:1;min-width:0;overflow-x:auto;scrollbar-width:none}
+.site-nav::-webkit-scrollbar{display:none}
+.site-nav a{flex:none;color:var(--fog);text-decoration:none;font:540 14.5px/1 var(--f-body);padding:9px 12px;border-radius:999px;transition:color .2s,background .2s}
+.site-nav a:hover{color:var(--paper)}
+.site-nav a.on{color:var(--flare);background:rgba(249,115,22,.14)}
+.gh{flex:none;padding:9px 15px}
+.gh svg{width:17px;height:17px}
+.skip{position:absolute;left:-9999px;top:8px;z-index:60;padding:10px 14px;border-radius:10px;background:var(--ink-3);color:var(--paper)}
+.skip:focus{left:16px}
+@media (max-width:760px){
+  .site-head{flex-wrap:wrap;row-gap:8px;padding-bottom:8px}
+  .site-nav{order:3;flex-basis:100%;margin-inline:-6px}
+  .site-nav a{font-size:13.5px;padding:7px 10px}
+  .gh{margin-left:auto}
+}
+
+/* ---------- left table of contents: faint ticks that open into a menu when the pointer comes near ---------- */
+.toc{display:none}
+@media (min-width:900px) and (hover:hover){
+  .toc{display:block;position:fixed;z-index:15;left:0;top:50%;transform:translateY(-50%);max-height:calc(100vh - 120px);overflow-y:auto;scrollbar-width:none;
+    padding:14px 40px 14px max(14px,env(safe-area-inset-left,0px))}
+  .toc::-webkit-scrollbar{display:none}
+  .toc ol{list-style:none;margin:0;padding:0}
+  .toc>ol{display:grid;gap:10px;padding:8px 10px 8px 0;border-radius:0 14px 14px 0;border:1px solid transparent;border-left:0;transition:background .2s,border-color .2s,box-shadow .2s}
+  .toc-g>ol{display:grid;gap:1px}
+  .toc-gl{display:block;height:0;overflow:hidden;padding-left:22px;font:600 12px/18px var(--f-body);color:var(--dim);opacity:0;transition:opacity .18s}
+  .toc a{display:flex;align-items:center;gap:10px;height:15px;padding-right:6px;color:var(--fog);text-decoration:none;font-size:13.5px;white-space:nowrap}
+  .toc a i{flex:none;width:12px;height:2px;border-radius:1px;background:rgba(154,172,190,.32);transition:width .2s,background .2s}
+  .toc-g.on a i{background:rgba(154,172,190,.6)}
+  .toc a.on i{width:22px;background:var(--molten)}
+  .toc a span{opacity:0;transform:translateX(-6px);transition:opacity .18s,transform .18s,color .2s;pointer-events:none}
+  .toc:hover>ol,.toc:focus-within>ol{background:rgba(17,29,42,.94);border-color:var(--line);box-shadow:0 12px 40px rgba(0,0,0,.45);padding-left:14px;margin-left:-14px}
+  .toc:hover a span,.toc:focus-within a span{opacity:1;transform:none;pointer-events:auto}
+  .toc:hover .toc-gl,.toc:focus-within .toc-gl{height:18px;opacity:1}
+  .toc:hover a,.toc:focus-within a{height:24px}
+  .toc:hover .toc-g.multi a span,.toc:focus-within .toc-g.multi a span{padding-left:12px}
+  .toc a:hover span,.toc a.on span{color:var(--paper)}
+  .toc a:hover i{background:var(--fog)}
+  .toc a.on:hover i{background:var(--molten)}
+  .toc a:focus-visible{outline:2px solid var(--core);outline-offset:2px;border-radius:4px}
+  .slide{padding-left:max(52px,env(safe-area-inset-left,0px))}
+}
+@media (prefers-reduced-motion:reduce){.toc a span,.toc a i,.toc>ol{transition:none}}
+/* ---------- sections ---------- */
+.deck{position:relative;z-index:1}
+.slide{position:relative;display:flex;min-height:100vh;min-height:100svh;scroll-margin-top:0;
+  padding-top:calc(env(safe-area-inset-top,0px) + 104px);padding-bottom:72px;
+  padding-left:max(16px,env(safe-area-inset-left,0px));padding-right:max(16px,env(safe-area-inset-right,0px))}
+@media (min-width:901px){.slide{padding-right:max(48px,env(safe-area-inset-right,0px))}}
+.slide+.slide::before{content:"";position:absolute;top:0;left:max(16px,env(safe-area-inset-left,0px));right:max(16px,env(safe-area-inset-right,0px));height:1px;
+  background:linear-gradient(90deg,rgba(38,57,78,0),rgba(38,57,78,.9) 20%,rgba(38,57,78,.9) 80%,rgba(38,57,78,0))}
+.wrap{width:100%;max-width:1500px;margin:auto;padding-inline:clamp(0px,3.4vw,72px)}
+.js .slide:not(.seen) [data-a]{opacity:0}
+.slide.seen [data-a]{animation:rise .9s var(--ease-out) both;animation-delay:calc(var(--d,0) * 85ms + 80ms)}
+@keyframes rise{from{opacity:0;transform:translateY(26px);filter:blur(10px)}}
+.guide{display:flex;gap:10px;align-items:flex-start;margin:18px 0 0;max-width:74ch;font-size:14.5px;line-height:1.5;color:var(--fog);
+  padding:11px 14px;border-radius:12px;background:rgba(17,29,42,.6);border:1px dashed rgba(154,172,190,.32)}
+.guide svg{flex:none;width:18px;height:18px;margin-top:2px;color:var(--core)}
+.guide b{color:var(--paper);font-weight:600}
+
+/* ---------- type ---------- */
+.h{font-family:var(--f-display);font-weight:720;font-size:clamp(34px,4.2vw,76px);line-height:.98;letter-spacing:-.035em;margin:0 0 .42em;text-wrap:balance;max-width:20ch}
+.h.sm{font-size:clamp(32px,3.3vw,58px)}
+.lead{font-size:clamp(16.5px,1.28vw,21px);line-height:1.55;color:var(--fog);max-width:56ch;margin:0 0 1.4em;text-wrap:pretty}
+.lead b,.lead strong{color:var(--paper);font-weight:600}
+.k{font-family:var(--f-mono);font-size:.86em;color:var(--core);background:rgba(249,115,22,.11);padding:.08em .38em;border-radius:6px;white-space:nowrap}
+.note{font-size:13.5px;color:var(--dim);line-height:1.5;margin:0}
+h3{font:650 18px/1.25 var(--f-body);margin:0 0 6px;letter-spacing:-.01em}
+.mono{font-family:var(--f-mono)}
+.tnum{font-variant-numeric:tabular-nums}
+
+/* ---------- shared components ---------- */
+.panel{background:rgba(17,29,42,.8);border:1px solid var(--line);border-radius:18px;backdrop-filter:blur(12px);-webkit-backdrop-filter:blur(12px)}
+.btn{display:inline-flex;align-items:center;gap:8px;font:560 14px/1 var(--f-body);padding:11px 17px;border-radius:999px;border:1px solid var(--line);background:var(--ink-3);color:var(--paper);cursor:pointer;text-decoration:none;transition:border-color .2s,background .2s,transform .15s,opacity .2s}
+.btn:hover{border-color:var(--ember)}
+.btn:active{transform:translateY(1px)}
+.btn.hot{background:var(--molten);border-color:var(--molten);color:#1B0C03}
+.btn.hot:hover{background:var(--ember);border-color:var(--ember)}
+.btn[aria-pressed="true"]{background:rgba(242,96,126,.14);border-color:var(--fault);color:#FFD5DE}
+.btn:disabled{opacity:.4;cursor:not-allowed;transform:none}
+.seg{display:inline-flex;border:1px solid var(--line);border-radius:999px;padding:3px;background:var(--ink-2);gap:2px}
+.seg button{border:0;background:none;padding:9px 15px;border-radius:999px;font:560 13.5px/1 var(--f-body);color:var(--fog);cursor:pointer;transition:background .25s,color .25s}
+.seg button[aria-pressed="true"]{background:var(--ink-3);color:var(--paper);box-shadow:inset 0 0 0 1px var(--line)}
+.seg button.c[aria-pressed="true"]{color:var(--frost);box-shadow:inset 0 0 0 1px rgba(124,200,245,.45)}
+.seg button.w[aria-pressed="true"]{color:var(--core);box-shadow:inset 0 0 0 1px rgba(251,146,60,.55)}
+.controls{display:flex;flex-wrap:wrap;gap:10px;align-items:center}
+.split{display:grid;grid-template-columns:minmax(0,1fr) minmax(0,1.08fr);gap:clamp(28px,4.5vw,84px);align-items:center}
+.split>*{min-width:0}
+.pill{display:inline-flex;align-items:center;gap:6px;font:550 12.5px/1 var(--f-mono);padding:7px 11px;border-radius:999px;border:1px solid var(--line);color:var(--fog);white-space:nowrap;transition:all .35s}
+.pill.good{border-color:rgba(251,146,60,.7);color:var(--core);background:rgba(249,115,22,.12)}
+.pill.bad{border-color:rgba(242,96,126,.7);color:#FFC2CF;background:rgba(242,96,126,.12)}
+.pill.cold{border-color:rgba(124,200,245,.55);color:var(--frost);background:rgba(124,200,245,.08)}
+.stat b{display:block;font:740 clamp(30px,3vw,52px)/1 var(--f-display);letter-spacing:-.035em;color:var(--core);font-variant-numeric:tabular-nums}
+.stat span{font-size:14px;color:var(--fog)}
+kbd{font:500 12px var(--f-mono);border:1px solid var(--line);border-bottom-width:2px;border-radius:6px;padding:2px 7px;color:var(--paper);background:var(--ink-2)}
+
+/* ---------- logo ---------- */
+.iso-logo{width:100%;height:100%;overflow:visible;display:block}
+.lg-hover{animation:hover 3.4s ease-in-out infinite alternate}
+@keyframes hover{to{transform:translateY(-9px)}}
+.seen .lg-drop{animation:drop 1.6s cubic-bezier(.3,1.45,.5,1) .3s both}
+@keyframes drop{from{transform:translateY(-200px);opacity:0}35%{opacity:1}}
+.lg-glow{transform-origin:110px 120px;transform-box:view-box;animation:glow 3.4s ease-in-out infinite alternate}
+@keyframes glow{from{opacity:.5;transform:scale(.9)}to{opacity:1;transform:scale(1.06)}}
+.lg-core polygon{transition:fill .35s}
+.lg-core.crashed .f-top{fill:#BFE6FB}.lg-core.crashed .f-l{fill:#7CC8F5}.lg-core.crashed .f-r{fill:#4FA3D6}
+.lg-core.crashed .bolt{fill:#F2607E}
+.lg-ghost polygon{fill:rgba(249,115,22,.06);stroke:#FFC27A;stroke-width:3;stroke-dasharray:7 6;stroke-linejoin:round;transition:fill .4s,stroke .4s}
+.lg-ghost .bolt{fill:none;stroke:none}
+.lg-ghost.solid polygon{stroke-dasharray:none}
+.lg-ghost.solid .f-top{fill:#FB923C}.lg-ghost.solid .f-l{fill:#EA580C}.lg-ghost.solid .f-r{fill:#F97316}.lg-ghost.solid .bolt{fill:#FFF7ED;stroke:none}
+.lg-ghost-l{font:500 13px var(--f-mono);fill:var(--dim);text-anchor:middle;transition:opacity .3s}
+.lg-mem{fill:url(#memg);opacity:.9}
+.lg-scan{opacity:0}
+
+/* ---------- 1 title ---------- */
+.title-grid{display:grid;grid-template-columns:minmax(0,.9fr) minmax(0,1.1fr);gap:clamp(16px,4vw,80px);align-items:center}
+.logo-stage{position:relative;width:100%;max-width:460px;aspect-ratio:236/300;justify-self:center;max-height:52vh}
+.hero-demo{display:flex;flex-direction:column;align-items:center;gap:14px;min-width:0}
+.mech{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:8px;width:100%;max-width:520px}
+.mbtn{display:flex;flex-direction:column;gap:3px;text-align:left;padding:11px 13px;border-radius:14px;border:1px solid var(--line);background:rgba(17,29,42,.82);cursor:pointer;transition:border-color .2s,background .2s,transform .15s}
+.mbtn b{font:640 15px/1.2 var(--f-body)}
+.mbtn small{font-size:12.5px;color:var(--fog);line-height:1.3}
+.mbtn:hover{border-color:var(--ember)}
+.mbtn:active{transform:translateY(1px)}
+.mbtn[data-m="crash"]:hover{border-color:var(--frost)}
+.mbtn:disabled{opacity:.45;cursor:not-allowed;transform:none}
+.mech-read{margin:0;width:100%;max-width:520px;min-height:3em;font-size:14.5px;line-height:1.45;color:var(--fog);text-align:center}
+.mech-read b{color:var(--paper);font-weight:600}
+.mech-read .t{font:700 15px var(--f-mono);color:var(--core)}
+.mech-read .t.cold{color:var(--frost)}
+.chipfly{position:absolute;left:0;top:0;z-index:4;pointer-events:none;font:600 12.5px var(--f-mono);white-space:nowrap;padding:6px 10px;border-radius:9px;
+  color:var(--flare);background:rgba(27,12,3,.92);border:1px solid rgba(251,146,60,.8);box-shadow:0 0 24px rgba(249,115,22,.55)}
+.chipfly .d{color:#A9D8F5}.chipfly .a{color:var(--core)}
+.pop{position:absolute;z-index:4;pointer-events:none;font:700 14px var(--f-mono);color:var(--flare);white-space:nowrap;text-shadow:0 0 14px rgba(249,115,22,.9)}
+.pop.cold{color:#DDF3FF;text-shadow:0 0 14px rgba(124,200,245,.9)}
+/* hero demo overlays */
+.mech-read{min-height:2.9em}
+.mech-cap{margin:0;width:100%;max-width:520px;font-size:13.5px;line-height:1.45;color:var(--dim);text-align:center;text-wrap:pretty}
+.mbtn[data-m="cold"]:hover{border-color:var(--frost)}
+.mbtn.base small{color:var(--dim)}
+.hx-gc{fill:#FFF7ED;opacity:.16;transition:opacity .5s,fill .5s}
+.hx-gc.stale{fill:#0B1520;opacity:.85;stroke:#7CC8F5;stroke-width:1}
+.hx-gc.fresh{fill:#FFF7ED;opacity:1}
+.hx-gc.off{opacity:0}
+.hx-wc{fill:#FFC27A;opacity:.8;transition:opacity .5s}
+.hx-wc.off{opacity:.06}
+.hx-memglow{transition:opacity .6s}
+.hx-wipe{opacity:0}
+.lg-core.hx-empty polygon{fill:rgba(124,200,245,.05);stroke:#7CC8F5;stroke-width:2;stroke-dasharray:6 5;stroke-linejoin:round}
+.lg-core.hx-empty .bolt{fill:none;stroke:none}
+.lg-core.hx-slow polygon{transition:fill 1.4s}
+.hx-cold .lg-glow{animation:none;opacity:.08;transition:opacity .8s}
+.hx-tag{position:absolute;left:0;top:0;transform:translate(-50%,-50%);z-index:3;pointer-events:none;white-space:nowrap;font:600 12.5px/1 var(--f-mono);padding:5px 9px;border-radius:999px;color:var(--fog);background:rgba(11,21,32,.88);border:1px solid var(--line);transition:color .4s,border-color .4s,box-shadow .4s,opacity .4s}
+.hx-tag span{color:var(--dim);font-weight:500;margin-left:6px}
+.hx-ver.live{color:var(--flare);border-color:rgba(251,146,60,.75);box-shadow:0 0 18px rgba(249,115,22,.35)}
+.hx-ver.live span{color:var(--core)}
+.hx-res{font-size:14px;color:var(--flare);border-color:rgba(251,146,60,.75);background:rgba(27,12,3,.92);box-shadow:0 0 20px rgba(249,115,22,.3)}
+.hx-res span{color:var(--core)}
+.hx-res.cold{color:#DDF3FF;border-color:rgba(124,200,245,.6);background:rgba(8,20,32,.92);box-shadow:0 0 20px rgba(124,200,245,.25)}
+.hx-res.cold span{color:var(--frost)}
+.hx-timer{display:flex;flex-direction:column;align-items:center;gap:5px;border-radius:12px;padding:8px 13px;color:#DDF3FF;border-color:rgba(124,200,245,.6)}
+.hx-timer b{font:700 22px/1 var(--f-mono);font-variant-numeric:tabular-nums}
+.hx-timer span{margin:0;color:var(--frost)}
+.hx-timer i{font:500 11px/1 var(--f-mono);font-style:normal;color:var(--dim)}
+.hx-check{position:absolute;left:0;top:0;z-index:3;pointer-events:none;display:grid;gap:5px;font:500 11.5px/1.3 var(--f-mono);color:var(--fog);background:rgba(11,21,32,.92);border:1px solid var(--line);border-radius:10px;padding:7px 9px;transition:border-color .4s,box-shadow .4s}
+.hx-ch{color:var(--paper);font-weight:600}
+.hx-cg{display:grid;grid-template-columns:auto auto;gap:2px 12px}
+.hx-cg span{display:flex;justify-content:space-between;gap:8px}
+.hx-check b{color:var(--paper);font-weight:700;font-variant-numeric:tabular-nums}
+.hx-check b.hit{color:var(--core)}
+.hx-cf{color:var(--dim)}
+.hx-check.ok{border-color:rgba(251,146,60,.75);box-shadow:0 0 18px rgba(249,115,22,.3)}
+.hx-check.ok .hx-cf{color:var(--core);font-weight:700}
+.chipfly.hx-chip{display:grid;gap:3px;font-size:12px;border-radius:10px;padding:7px 11px}
+@media (prefers-reduced-motion:reduce){.hx-gc,.hx-wc,.hx-memglow,.hx-tag,.lg-core polygon,.lg-core.hx-slow polygon{transition:none}}
+.wordmark{font-family:var(--f-display);font-weight:800;font-size:clamp(84px,12.5vw,224px);line-height:.82;letter-spacing:-.035em;margin:0 0 .14em}
+.wordmark .rsi{color:var(--molten);text-shadow:0 0 60px rgba(249,115,22,.35)}.wordmark .bx{color:#8B9DB1}
+.hero-line{font-family:var(--f-display);font-weight:520;font-size:clamp(25px,2.6vw,46px);line-height:1.08;letter-spacing:-.025em;max-width:21ch;margin:0 0 .55em;text-wrap:balance}
+.hint{display:flex;gap:10px;align-items:center;color:var(--dim);font-size:14px;margin-top:26px}
+
+/* ---------- 2 cold restart ---------- */
+.diff{overflow:hidden;max-width:640px}
+.code-head{display:flex;justify-content:space-between;gap:12px;flex-wrap:wrap;padding:12px 18px;border-bottom:1px solid var(--line);font:500 12.5px var(--f-mono);color:var(--dim)}
+.code{font:450 clamp(12px,.95vw,14.5px)/1.75 var(--f-mono);margin:0;padding:14px 0;overflow-x:auto;color:var(--fog);white-space:pre}
+.code span{display:block;padding:0 18px}
+.code .del{background:rgba(124,200,245,.09);color:#A9D8F5}
+.code .add{background:rgba(249,115,22,.13);color:var(--core)}
+.restart{padding:clamp(22px,2.6vw,40px);position:relative;overflow:hidden}
+.restart::after{content:"";position:absolute;inset:0;pointer-events:none;opacity:var(--frost-level,0);
+  background:radial-gradient(90% 70% at 100% 0%,rgba(124,200,245,.26),rgba(124,200,245,0) 70%),radial-gradient(60% 50% at 0% 100%,rgba(124,200,245,.14),rgba(124,200,245,0) 70%)}
+.clock{font:760 clamp(80px,9.5vw,170px)/.84 var(--f-display);letter-spacing:-.055em;color:var(--frost);font-variant-numeric:tabular-nums;text-shadow:0 0 40px rgba(124,200,245,.25)}
+.clock small{font-size:.3em;letter-spacing:0;color:var(--fog);margin-left:.18em;font-weight:500}
+.clock-sub{color:var(--fog);font-size:15px;margin-top:8px}
+.meter{height:6px;border-radius:3px;background:var(--line);margin:18px 0 20px;overflow:hidden}
+.meter i{display:block;height:100%;width:0;background:linear-gradient(90deg,var(--frost-deep),var(--frost));border-radius:3px}
+.stages{list-style:none;margin:0 0 18px;padding:0;display:grid;grid-template-columns:1fr 1fr;gap:6px;counter-reset:st}
+.stages li{display:flex;align-items:center;gap:11px;padding:9px 11px;border-radius:11px;color:var(--dim);font-size:14.5px;counter-increment:st;transition:background .3s,color .3s}
+.stages li::before{content:counter(st);flex:none;width:24px;height:24px;border-radius:50%;display:grid;place-items:center;font:600 11.5px var(--f-mono);border:1px solid var(--line);transition:all .3s}
+.stages li.on{background:rgba(124,200,245,.11);color:var(--paper)}
+.stages li.on::before{border-color:var(--frost);color:var(--frost);box-shadow:0 0 14px rgba(124,200,245,.55)}
+.stages li.done{color:var(--fog)}
+.stages li.done::before{content:"✓";border-color:var(--frost-deep);color:var(--frost)}
+.rs-status{font-size:15px;color:var(--paper);min-height:1.5em;margin:0 0 14px}
+
+/* ---------- 4 engine anatomy ---------- */
+.engine{padding:clamp(18px,2vw,28px);position:relative;overflow:hidden}
+.eng-head{display:flex;justify-content:space-between;align-items:center;margin-bottom:14px;font:550 13.5px var(--f-mono);color:var(--fog)}
+.mem{display:grid;grid-template-columns:1.6fr 1fr;gap:10px}
+.blk{--lvl:100;border-radius:13px;padding:14px 15px;border:1px solid rgba(251,146,60,.38);background:rgba(36,55,75,.4);position:relative;overflow:hidden;min-height:84px;transition:border-color .5s,box-shadow .5s}
+.blk::before{content:"";position:absolute;left:0;right:0;bottom:0;height:calc(var(--lvl) * 1%);background:linear-gradient(180deg,rgba(249,115,22,.30),rgba(154,52,18,.22));z-index:0}
+.blk>*{position:relative;z-index:1}
+.blk b{display:block;font:620 15px/1.25 var(--f-body)}
+.blk small{display:block;color:var(--fog);font-size:13px;margin-top:2px}
+.blk.weights{grid-row:span 3;min-height:200px;box-shadow:inset 0 0 50px rgba(249,115,22,.22),0 0 30px rgba(249,115,22,.12)}
+.blk.weights .wgrid{position:absolute;inset:auto 12px 12px 12px;display:grid;grid-template-columns:repeat(10,1fr);gap:4px;z-index:1}
+.blk.weights .wgrid i{aspect-ratio:1;border-radius:3px;background:rgba(255,194,122,.55);animation:shimmer 2.6s ease-in-out infinite;animation-delay:calc(var(--k) * -97ms)}
+@keyframes shimmer{50%{background:rgba(255,194,122,.22)}}
+.blk .cells{display:grid;grid-template-columns:repeat(8,1fr);gap:3px;margin-top:8px}
+.blk .cells i{aspect-ratio:1;border-radius:2px;background:rgba(255,194,122,.45)}
+.engine.cold .blk{border-color:rgba(124,200,245,.3);box-shadow:none}
+.engine.cold .blk::before{background:linear-gradient(180deg,rgba(249,115,22,.30),rgba(154,52,18,.22))}
+.engine.cold .blk .wgrid i,.engine.cold .blk .cells i{background:rgba(124,200,245,.16);animation:none}
+.engine.cold .blk.filled .wgrid i,.engine.cold .blk.filled .cells i{background:rgba(255,194,122,.5)}
+.swap{display:grid;grid-template-columns:minmax(0,.95fr) minmax(0,1.05fr);gap:clamp(18px,2.6vw,40px);align-items:stretch;margin-top:8px}
+.swap>*{min-width:0}
+.ap{display:flex;flex-direction:column;overflow:hidden}
+.ap-body{padding:16px 18px;display:flex;flex-direction:column;gap:12px;flex:1;min-height:300px}
+.ap-think{margin:0;font-size:15.5px;line-height:1.5;color:var(--paper);min-height:3em}
+.ap-think .who{display:block;font:500 12.5px var(--f-mono);color:var(--dim);margin-bottom:3px}
+.ap-diff{border-radius:12px;background:var(--ink);border:1px solid var(--line);overflow:hidden;transition:opacity .3s}
+.ap-diff .code-head{padding:9px 14px}
+.ap-diff .code{padding:10px 0}
+.ap-diff .code span{padding:0 14px}
+.ap-cmd{font:500 13px/1.5 var(--f-mono);color:var(--core);margin:0;overflow-wrap:anywhere;min-height:1.5em}
+.ap-res{min-height:30px;display:flex;gap:8px;flex-wrap:wrap}
+.ap-foot{display:flex;gap:10px;flex-wrap:wrap;align-items:center;padding:12px 18px;border-top:1px solid var(--line)}
+.ap-dots{display:flex;gap:6px;margin-left:auto}
+.ap-dots i{width:8px;height:8px;border-radius:50%;background:var(--line);transition:background .3s,box-shadow .3s}
+.ap-dots i.on{background:var(--core);box-shadow:0 0 10px var(--molten)}
+.mods{display:grid;gap:7px;margin-top:12px}
+.mods .ml{font:500 12.5px var(--f-mono);color:var(--dim);margin-bottom:1px}
+.mod{display:grid;grid-template-columns:86px minmax(0,1fr) auto;gap:12px;align-items:center;padding:9px 12px;border-radius:11px;background:var(--ink-2);border:1px solid var(--line);transition:border-color .35s,background .35s,box-shadow .35s}
+.mod .kd{font:550 11.5px var(--f-mono);color:var(--dim);border:1px solid var(--line);border-radius:6px;padding:3px 6px;text-align:center}
+.mod b{font:550 14px var(--f-mono);color:var(--fog);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.mod .v{font:600 12.5px var(--f-mono);color:var(--dim);white-space:nowrap}
+.mod.target{border-color:rgba(251,146,60,.6)}
+.mod.swapped{border-color:var(--ember);background:rgba(249,115,22,.15);box-shadow:0 0 26px rgba(249,115,22,.4)}
+.mod.swapped b,.mod.swapped .v{color:var(--flare)}
+.mod.swapped .kd{border-color:rgba(251,146,60,.6);color:var(--core)}
+.engine.cold .mod{opacity:.45}
+.blk .kept{position:absolute;top:12px;right:12px;font:550 11.5px var(--f-mono);color:var(--core);opacity:0;transition:opacity .3s}
+.engine.keep .blk .kept{opacity:1}
+.engine.keep .blk{border-color:rgba(255,194,122,.75)}
+#engine .blk{min-height:64px;padding:11px 13px}
+#engine .blk.weights{min-height:150px}
+#engine .mem{gap:8px}
+.blk .cells i.re{background:var(--flare);box-shadow:0 0 8px var(--molten)}
+.eng-foot{display:flex;justify-content:space-between;align-items:flex-end;gap:16px;flex-wrap:wrap;margin-top:18px;padding-top:16px;border-top:1px solid var(--line)}
+.eng-foot small{display:block;color:var(--fog);font-size:13.5px}
+.eng-foot b{font:760 clamp(38px,3.6vw,60px)/1 var(--f-display);letter-spacing:-.04em;color:var(--core);font-variant-numeric:tabular-nums}
+.engine.cold .eng-foot b{color:var(--frost)}
+.eng-count{font:500 13px var(--f-mono);color:var(--fog);text-align:right}
+
+/* ---------- 5 ladder ---------- */
+.lad-grid{display:grid;grid-template-columns:minmax(0,.78fr) minmax(0,1.5fr);gap:clamp(22px,3.2vw,56px);align-items:start}
+.lad-grid>*{min-width:0}
+.edits{display:flex;flex-direction:column;gap:7px;margin-top:4px}
+.edits button{text-align:left;border:1px solid var(--line);background:rgba(17,29,42,.7);color:var(--fog);padding:11px 14px;border-radius:12px;cursor:pointer;font:520 14.5px/1.3 var(--f-body);transition:all .25s}
+.edits button:hover{border-color:var(--ember);color:var(--paper)}
+.edits button[aria-pressed="true"]{border-color:var(--ember);color:var(--flare);background:rgba(249,115,22,.14)}
+.lad-grid>div:first-child{position:relative;z-index:6}
+.edits button{position:relative}
+.edits .tip{position:absolute;left:calc(100% + 14px);top:50%;z-index:8;width:max-content;max-width:min(460px,58vw);opacity:0;pointer-events:none;
+  transform:translate(-6px,-50%);transition:opacity .18s,transform .18s;border-radius:12px;background:var(--ink);border:1px solid rgba(251,146,60,.55);box-shadow:0 18px 50px rgba(0,0,0,.5);overflow:hidden}
+.edits .tip .code-head{padding:8px 12px}
+.edits .tip .code{padding:8px 0;font-size:12.5px}
+.edits .tip .code span{padding:0 12px}
+.edits button:hover .tip,.edits button:focus-visible .tip{opacity:1;transform:translate(0,-50%)}
+.ladder{position:relative;padding:16px 18px 14px;display:grid;grid-template-columns:minmax(118px,150px) minmax(0,1fr);gap:0 44px;align-items:center}
+.router{position:relative;z-index:2;padding:13px 14px;border-radius:14px;border:1px solid var(--line);background:var(--ink-2);transition:border-color .3s,box-shadow .3s}
+.router small{display:block;font:500 12px var(--f-mono);color:var(--dim)}
+.router b{display:block;font:640 15px/1.25 var(--f-body);margin-top:2px}
+.router .rt-why{display:block;margin-top:8px;font-size:13px;color:var(--core);min-height:3.9em;line-height:1.35}
+.router.busy{border-color:var(--ember);box-shadow:0 0 28px rgba(249,115,22,.38)}
+.rungs{position:relative;z-index:2;min-width:0}
+.lad-lines{position:absolute;left:0;top:0;pointer-events:none;overflow:visible;z-index:1}
+.lad-path{fill:none;stroke:rgba(52,76,102,.9);stroke-width:1.5;transition:stroke .3s,opacity .3s,stroke-width .3s}
+.lad-path.on{stroke:var(--ember);stroke-width:2.5}
+.ladder.routing .lad-path:not(.on){opacity:.3}
+.rpk{position:absolute;left:0;top:0;z-index:3;pointer-events:none}
+.rpk i{display:block;width:14px;height:14px;margin:-7px 0 0 -7px;border-radius:50%;background:var(--flare);box-shadow:0 0 0 3px rgba(249,115,22,.5),0 0 20px 5px rgba(249,115,22,.8)}
+.rung{display:grid;grid-template-columns:22px minmax(130px,230px) minmax(0,1fr);gap:14px;align-items:center;padding:7px 10px;border-radius:12px;transition:background .25s,box-shadow .25s;position:relative}
+.rung .gut{width:12px;height:12px;border-radius:50%;border:1.5px solid var(--line);justify-self:center;transition:all .2s}
+.rung .nm{font:620 14.5px/1.25 var(--f-body)}
+.rung .lat{display:block;font:500 12.5px var(--f-mono);color:var(--fog);margin-top:2px}
+.track{position:relative;height:16px;border-radius:8px;background:rgba(36,57,78,.55)}
+.track i{position:absolute;top:0;bottom:0;border-radius:8px;background:linear-gradient(90deg,var(--molten),var(--core));min-width:10px;opacity:.5;transition:opacity .3s,box-shadow .3s}
+.track .rl{position:absolute;top:-14px;bottom:-14px;width:0;border-left:2px dashed rgba(124,200,245,.55)}
+.rung.landed{background:rgba(249,115,22,.13);box-shadow:inset 0 0 0 1px rgba(251,146,60,.6)}
+.rung.landed .gut{background:var(--molten);border-color:var(--core);box-shadow:0 0 16px var(--molten)}
+.rung.landed .track i{opacity:1;box-shadow:0 0 18px rgba(249,115,22,.7)}
+.lad-div{display:flex;align-items:center;gap:10px;margin:10px 10px 4px 46px;font:500 12.5px var(--f-body);color:var(--dim)}
+.lad-div::after{content:"";flex:1;height:1px;background:var(--line)}
+.axis{display:grid;grid-template-columns:22px minmax(130px,230px) minmax(0,1fr);gap:14px;padding:6px 10px 0}
+.axis .ax{position:relative;height:34px}
+.axis .ax span{position:absolute;transform:translateX(-50%);font:500 11.5px var(--f-mono);color:var(--dim);top:2px;white-space:nowrap}
+.axis .ax span.rlab{color:var(--frost);top:17px}
+.readout{margin-top:16px;padding:18px 20px;display:grid;grid-template-columns:1fr auto;gap:6px 18px;align-items:start}
+.readout b{font:700 19px/1.25 var(--f-body)}
+.readout .rl-t{font:760 clamp(28px,2.6vw,42px)/1 var(--f-display);color:var(--core);letter-spacing:-.03em;grid-row:span 2;align-self:center;white-space:nowrap}
+.readout p{margin:0;color:var(--fog);font-size:14.5px;line-height:1.5}
+.readout .rd-diff{grid-column:1/-1;margin-top:8px;border-radius:10px;background:var(--ink);border:1px solid var(--line);overflow:hidden}
+.readout .rd-diff .code-head{padding:7px 12px}
+.readout .rd-diff .code{padding:8px 0;font-size:12.5px}
+.readout .rd-diff .code span{padding:0 12px}
+
+/* ---------- 6 lifecycle ---------- */
+.lc{display:grid;grid-template-columns:minmax(260px,.62fr) minmax(0,1.6fr);gap:clamp(22px,3vw,52px);align-items:start}
+.lc>*{min-width:0}
+.lc-rail{list-style:none;margin:6px 0 0;padding:0;display:grid;gap:4px;counter-reset:ph}
+.lc-rail li{display:grid;grid-template-columns:30px 1fr;gap:2px 12px;padding:9px 10px;border-radius:12px;counter-increment:ph;color:var(--dim);transition:background .3s,color .3s}
+.lc-rail li::before{content:counter(ph);grid-row:span 2;width:28px;height:28px;border-radius:50%;display:grid;place-items:center;font:600 12px var(--f-mono);border:1px solid var(--line);transition:all .3s}
+.lc-rail b{font:620 15px/1.2 var(--f-body);color:var(--fog)}
+.lc-rail span{font-size:13px;line-height:1.35}
+.lc-rail li{cursor:pointer}
+.lc-rail li:hover{background:rgba(255,255,255,.05)}
+.lc-rail li:focus-visible{outline:2px solid var(--core);outline-offset:2px}
+.lc-rail li.on{background:rgba(249,115,22,.12)}
+.lc-rail li.on b{color:var(--flare)}
+.lc-rail li.on::before{border-color:var(--core);color:var(--core);box-shadow:0 0 14px rgba(249,115,22,.6)}
+.lc-rail li.done::before{content:"✓";border-color:rgba(251,146,60,.6);color:var(--core)}
+.lc-rail li.done b{color:var(--paper)}
+.lc-rail li.bad::before{content:"✕";border-color:var(--fault);color:var(--fault)}
+.lc-stage{position:relative;padding:18px;display:grid;gap:clamp(30px,5vh,56px)}
+.lc-lines{position:absolute;left:0;top:0;pointer-events:none;overflow:visible;z-index:0}
+.lc-path{fill:none;stroke:var(--line);stroke-width:2;transition:stroke .3s}
+.lc-path.live{stroke:rgba(251,146,60,.55)}
+.lc>div,#lcStage>*{min-width:0}
+.lc-row1{display:flex;justify-content:space-between;gap:clamp(30px,6vw,120px);position:relative;z-index:1}
+.lc-row2{display:flex;justify-content:center;position:relative;z-index:1}
+.lc-node{background:var(--ink-2);border:1px solid var(--line);border-radius:14px;padding:12px 15px;min-width:0;position:relative;transition:border-color .3s,box-shadow .3s}
+.lc-node small{display:block;font:500 12px var(--f-mono);color:var(--dim)}
+.lc-node b{font:640 16px/1.3 var(--f-body)}
+#lcAgent{flex:1.4;max-width:420px}#lcBox{flex:1;max-width:260px}
+#lcCoord{width:min(100%,380px)}
+.lc-node code{display:block;font:500 13px/1.5 var(--f-mono);color:var(--core);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;margin-top:4px}
+.lc-res{margin-top:8px}
+.lc-res:empty{display:none}
+.lc-log{list-style:none;margin:6px 0 0;padding:0;font:500 12.5px/1.6 var(--f-mono);color:var(--fog);min-height:3.2em}
+.lc-log li{animation:fadeIn .35s ease both}
+.lc-log li.bad{color:#FFB3C3}
+@keyframes fadeIn{from{opacity:0;transform:translateY(4px)}}
+.lc-ranks{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:10px;position:relative;z-index:1}
+.lc-rank{background:var(--ink-2);border:1px solid var(--line);border-radius:14px;padding:11px 12px;position:relative;transition:border-color .3s,box-shadow .3s,background .3s}
+.rk-top{display:flex;justify-content:space-between;align-items:center}
+.rk-top b{font:640 15px var(--f-body)}
+.lc-rank.gap{border-color:rgba(255,194,122,.6)}
+.pk span:empty{display:none}
+.rk-badge{display:inline-block;font:550 12.5px var(--f-mono);padding:5px 8px;border-radius:7px;margin:8px 0 6px;background:rgba(36,57,78,.7);color:var(--fog);transition:all .3s}
+.rk-badge.new{background:rgba(249,115,22,.2);color:var(--flare);box-shadow:0 0 14px rgba(249,115,22,.4)}
+.rk-meta{display:flex;justify-content:space-between;gap:6px;font:500 11.5px var(--f-mono);color:var(--dim)}
+.rk-meta b{color:var(--paper);font-weight:600;display:inline-block}
+.rk-vote{position:absolute;top:-13px;right:10px;font:650 12px var(--f-mono);padding:3px 8px;border-radius:999px;opacity:0;transform:translateY(4px);transition:all .25s;background:var(--ink-3);border:1px solid var(--line)}
+.rk-vote.show{opacity:1;transform:none}
+.rk-vote.yes{color:var(--core);border-color:rgba(251,146,60,.6)}
+.rk-vote.no{color:#FFC2CF;border-color:var(--fault)}
+.lc-rank.flash{animation:rflash .8s ease}
+@keyframes rflash{30%{box-shadow:0 0 40px rgba(249,115,22,.8);border-color:var(--core)}}
+.lc-rank.flash-bad{animation:rbad .9s ease}
+.lc-rank.dead{border-color:var(--fault);border-style:dashed;background:rgba(242,96,126,.06)}
+.lc-rank.dead .rk-badge{background:rgba(242,96,126,.16);color:#FFC2CF}
+.lc-rank.dead .rk-meta{opacity:.35}
+@keyframes rbad{30%{box-shadow:0 0 34px rgba(242,96,126,.6);border-color:var(--fault)}}
+.bump{animation:bump .35s ease}
+@keyframes bump{40%{transform:scale(1.35);color:var(--core)}}
+.pk{position:absolute;left:0;top:0;z-index:3;pointer-events:none;display:flex;align-items:center;gap:6px}
+.pk i{width:12px;height:12px;margin:-6px 0 0 -6px;border-radius:50%;background:var(--flare);box-shadow:0 0 0 3px rgba(249,115,22,.5),0 0 18px 4px rgba(249,115,22,.8);flex:none}
+.pk span{font:600 11.5px var(--f-mono);color:var(--flare);background:rgba(27,12,3,.85);border:1px solid rgba(251,146,60,.6);padding:2px 7px;border-radius:999px;transform:translateY(-6px);white-space:nowrap}
+.pk.bad i{background:#FFE3EA;box-shadow:0 0 0 3px rgba(242,96,126,.5),0 0 18px 4px rgba(242,96,126,.7)}
+.pk.bad span{color:#FFD5DE;border-color:var(--fault);background:rgba(40,8,16,.85)}
+.lc-bottom{display:flex;flex-direction:column;gap:12px;margin-top:14px}
+.lc-narr{margin:0;font-size:clamp(15px,1.15vw,18px);line-height:1.5;color:var(--paper);min-height:3em;max-width:72ch}
+
+/* ---------- edit card beside the ladder: follows the figure's engine tab ---------- */
+.ec-body{padding:16px 18px 18px;display:grid;gap:10px}
+.ec-body>b{font:650 clamp(17px,1.4vw,21px)/1.3 var(--f-body);color:var(--paper);text-wrap:balance}
+.ec-body p{margin:0;color:var(--fog);font-size:14px;line-height:1.5}
+.ec-body dl{display:grid;grid-template-columns:auto minmax(0,1fr);gap:4px 14px;margin:2px 0 0;align-items:baseline}
+.ec-body dt{color:var(--dim);font-size:13.5px}
+.ec-body dd{margin:0;font:700 18px var(--f-body);font-variant-numeric:tabular-nums}
+.ec-body dd.cold{color:var(--frost)}.ec-body dd.warm{color:var(--ember)}
+.ec-body dd small{font:500 13px var(--f-body);color:var(--fog);margin-left:8px}
+.ec-body .ec-hint{color:var(--dim);font-size:13px}
+.ec .code-head [data-eng]{color:var(--core)}
+/* ---------- figure pair on the overhead slide ---------- */
+.fig-pair{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:22px;align-items:stretch;margin:6px 0 20px}
+.fig-step{min-width:0;display:grid;grid-template-rows:auto 1fr;gap:10px}
+.fig-step>.fplate{display:flex;flex-direction:column}
+.fig-step>.fplate .bf-rows{flex:1;align-content:space-evenly}
+.fig-step>.fplate .pl-foot{margin-top:14px}
+.fig-cap{margin:0;display:flex;align-items:center;gap:10px;font:620 16px/1.3 var(--f-body);color:var(--paper)}
+.fig-cap span{flex:none;width:26px;height:26px;border-radius:50%;display:grid;place-items:center;font:600 12px var(--f-mono);color:var(--core);border:1px solid rgba(251,146,60,.6)}
+@media (max-width:1100px){.fig-pair{grid-template-columns:minmax(0,1fr)}}
+/* ---------- 10 architecture ---------- */
+/* nested boxes: warm (kept) is orange, cold (rebuilt) is frost blue */
+.arch{display:grid;grid-template-columns:minmax(0,1.35fr) minmax(0,1fr);gap:clamp(20px,3.4vw,56px);align-items:start}
+.arch>*{min-width:0}
+.nest-wrap{display:grid;gap:10px}
+.nest-cp,.nest-warm,.nest-ver{display:grid;grid-template-columns:auto auto minmax(0,1fr);gap:4px 10px;align-items:baseline;padding:11px 14px;border-radius:14px;border:1px solid var(--line);background:var(--ink-2);transition:border-color .35s,box-shadow .35s}
+.nest-cp em,.nest-warm em,.nest-ver em{font-style:normal;color:var(--fog);font-size:13.5px;line-height:1.4}
+.nest-cp b,.nest-warm b,.nest-ver b{font:640 14.5px/1.3 var(--f-body);white-space:nowrap}
+.nest-ver{border-style:dashed}
+.own{width:22px;height:22px;border-radius:6px;display:grid;place-items:center;font:700 12px var(--f-display);border:1.5px solid var(--line);color:var(--fog);align-self:center}
+.nest-node{display:grid;grid-template-columns:minmax(0,1fr) minmax(0,.42fr);gap:10px;align-items:stretch}
+.nest-warm{grid-template-columns:auto minmax(0,1fr);align-content:start;border-color:rgba(251,146,60,.45);background:linear-gradient(rgba(249,115,22,.10),rgba(249,115,22,.03))}
+.nest-warm em{grid-column:1/-1}
+.nb{position:relative;border:1.5px solid rgba(251,146,60,.55);border-radius:14px;padding:30px 12px 12px;background:rgba(249,115,22,.06);transition:border-color .45s,background .45s,box-shadow .45s}
+.nb .nb{margin-top:8px}
+.nb-t{position:absolute;left:12px;right:10px;top:8px;display:flex;justify-content:space-between;gap:8px;font-size:13px;line-height:1.2}
+.nb-t b{font-weight:640;color:var(--paper);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.nb-t i{font:600 12px var(--f-mono);font-style:normal;color:var(--frost);white-space:nowrap}
+.nb[data-b="code"]{min-height:54px}
+.nb-state{display:flex;flex-wrap:wrap;gap:8px}
+.nchip{display:inline-flex;align-items:baseline;gap:6px;padding:6px 10px;border-radius:9px;border:1.5px solid rgba(251,146,60,.55);background:rgba(249,115,22,.08);font:600 13px var(--f-body);color:var(--paper);transition:border-color .45s,background .45s,color .45s}
+.nchip small{font:500 11.5px var(--f-body);color:var(--dim)}
+.nest-warm .nchip{grid-column:1/-1;justify-self:start}
+.nest-node .cold{border-color:var(--frost);border-style:dashed;background:rgba(124,200,245,.08);box-shadow:inset 0 0 22px rgba(124,200,245,.10)}
+.nest-node .cold .nb-t b,.nchip.cold{color:var(--frost)}
+.nest-node .nb.sel{box-shadow:0 0 0 3px rgba(124,200,245,.25),0 0 40px rgba(124,200,245,.25)}
+.nest-node .warm-glow{box-shadow:0 0 26px rgba(249,115,22,.35)}
+.nest-node .gone{opacity:.45}
+[data-o].on{border-color:var(--ember);box-shadow:0 0 22px rgba(249,115,22,.25)}
+[data-o].on .own,.bnd-owners [data-o].on i{border-color:var(--ember);color:var(--ember)}
+.bnd-side{display:grid;gap:12px}
+.bnd-list{list-style:none;margin:0;padding:0;display:grid;gap:4px}
+.bnd-list li{display:flex;justify-content:space-between;gap:12px;align-items:baseline;padding:10px 12px;border-radius:12px;cursor:pointer;color:var(--fog);transition:background .25s,color .25s}
+.bnd-list li b{font:620 15px/1.25 var(--f-body);color:var(--paper)}
+.bnd-list li span{font:600 13px var(--f-mono);color:var(--frost);white-space:nowrap}
+.bnd-list li:hover{background:rgba(255,255,255,.05)}
+.bnd-list li:focus-visible{outline:2px solid var(--frost);outline-offset:2px}
+.bnd-list li.on{background:rgba(124,200,245,.10);box-shadow:inset 3px 0 0 var(--frost)}
+.bnd-note{margin:0;font-size:13px;line-height:1.45;color:var(--dim)}
+.bnd-card{border:1px solid var(--line);border-radius:14px;background:var(--ink-2);padding:14px 16px;font-size:14px;line-height:1.5;color:var(--fog);min-height:178px}
+.bnd-card h3{margin:0 0 6px;font:680 17px/1.25 var(--f-body);color:var(--paper)}
+.bnd-card p{margin:0 0 8px}
+.bnd-card dl{display:grid;grid-template-columns:auto minmax(0,1fr);gap:4px 12px;margin:0}
+.bnd-card dt{color:var(--dim);font-size:13px}
+.bnd-card dd{margin:0;color:var(--paper);font-size:13.5px}
+.bnd-card dd.cold{color:var(--frost)}.bnd-card dd.warm{color:var(--ember)}
+.bnd-owners{display:flex;flex-wrap:wrap;gap:6px 14px;font-size:13px;color:var(--fog)}
+.bnd-owners span{display:inline-flex;align-items:center;gap:6px;border:0;transition:color .3s}
+.bnd-owners i{font-style:normal;width:20px;height:20px;border-radius:6px;display:grid;place-items:center;font:700 11px var(--f-display);border:1.5px solid var(--line)}
+.bnd-owners span.on{color:var(--paper);box-shadow:none}
+
+/* ---------- 11 pool ---------- */
+.pool{display:grid;grid-template-columns:minmax(0,1fr) minmax(0,1.3fr);gap:clamp(24px,4vw,70px);align-items:center}
+.pool>*{min-width:0}
+.pool-viz{padding:20px}
+.pool-q{display:flex;gap:8px;align-items:center;min-height:62px;padding:10px;border-radius:14px;border:1px dashed var(--line);margin-bottom:14px;flex-wrap:wrap}
+.pool-q .ql{font:500 12.5px var(--f-mono);color:var(--dim);margin-right:6px}
+.agent{--age:0;width:46px;height:46px;border-radius:50%;display:grid;place-items:center;position:relative;flex:none;
+  background:conic-gradient(var(--core) calc(var(--age) * 360deg),rgba(38,57,78,.9) 0);transition:background .2s}
+.agent::before{content:"";position:absolute;inset:3px;border-radius:50%;background:var(--ink-3)}
+.agent .ag-l{position:relative;font:700 16px var(--f-display)}
+.agent .ag-p{position:absolute;bottom:-7px;right:-6px;font:600 10.5px var(--f-mono);background:var(--ink);border:1px solid var(--line);border-radius:999px;padding:1px 5px;color:var(--fog)}
+.agent.running{background:var(--molten);box-shadow:0 0 22px rgba(249,115,22,.6)}
+.agent.running::before{background:#3A1C0B}
+.agent.rogue{background:var(--fault);box-shadow:0 0 24px rgba(242,96,126,.7)}
+.agent.rogue::before{background:#3A0F1A}
+.slots{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:10px}
+.slot{border-radius:14px;border:1px solid var(--line);background:var(--ink-2);padding:12px 14px;transition:all .35s}
+.sl-head{display:flex;justify-content:space-between;gap:8px;align-items:baseline;flex-wrap:wrap}
+.sl-head b{font:640 15px var(--f-body)}
+.sl-st{font:500 12px var(--f-mono);color:var(--dim)}
+.sl-body{height:58px;display:flex;align-items:center;gap:10px}
+.sl-bar{height:5px;border-radius:3px;background:var(--line);overflow:hidden}
+.sl-bar i{display:block;height:100%;width:0;background:var(--molten);border-radius:3px}
+.slot.busy{border-color:rgba(251,146,60,.5)}
+.slot.busy .sl-st{color:var(--core)}
+.slot.poisoned{border-color:var(--fault);background:rgba(242,96,126,.1);box-shadow:0 0 0 4px rgba(242,96,126,.12)}
+.slot.poisoned .sl-st{color:#FFC2CF}
+.slot.poisoned .sl-bar i{background:var(--fault)}
+.slot.respawn{border-color:rgba(124,200,245,.6);background:rgba(124,200,245,.07)}
+.slot.respawn .sl-st{color:var(--frost)}
+.pool-stats{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:16px;margin:22px 0}
+.pool-live{display:flex;gap:22px;margin-top:14px;font:500 13px var(--f-mono);color:var(--fog);flex-wrap:wrap}
+.pool-live b{color:var(--paper)}
+
+/* ---------- 12 results ---------- */
+.res-top{display:flex;justify-content:space-between;align-items:flex-end;gap:20px;flex-wrap:wrap;margin-bottom:10px}
+.res-top .lead{margin:0}
+.chart{padding:16px 20px 10px}
+.row{display:grid;grid-template-columns:minmax(120px,170px) minmax(0,1fr) 112px;gap:16px;align-items:center;padding:4px 0;border-bottom:1px solid rgba(38,57,78,.6)}
+.row:last-of-type{border-bottom:0}
+.row .en b{display:block;font:640 15px/1.2 var(--f-body)}
+.row .en small{font-size:12.5px;color:var(--dim)}
+.bars{display:grid;gap:4px}
+.bar{position:relative;height:13px}
+.bar i{position:absolute;left:0;top:0;bottom:0;border-radius:7px;width:0;min-width:4px}
+.bar.r i{background:linear-gradient(90deg,var(--frost-deep),var(--frost))}
+.bar.l i{background:linear-gradient(90deg,var(--molten),var(--core));box-shadow:0 0 12px rgba(249,115,22,.5)}
+.bar span{position:absolute;top:50%;transform:translateY(-50%);font:500 11.5px var(--f-mono);white-space:nowrap;padding-left:8px}
+.bar.r span{color:var(--frost)}.bar.l span{color:var(--core)}
+.row .sp{font:760 clamp(18px,1.6vw,26px)/1 var(--f-display);letter-spacing:-.02em;color:var(--core);text-align:right;opacity:.18;transition:opacity .35s,transform .35s;font-variant-numeric:tabular-nums}
+.row .sp.in{opacity:1}
+.chart-axis{display:grid;grid-template-columns:minmax(120px,170px) minmax(0,1fr) 112px;gap:16px;margin-top:6px}
+.chart-axis .ax{position:relative;height:20px}
+.chart-axis span{position:absolute;transform:translateX(-50%);font:500 11.5px var(--f-mono);color:var(--dim);white-space:nowrap}
+.legend{display:flex;gap:18px;font-size:13.5px;color:var(--fog);flex-wrap:wrap;align-items:center}
+.legend i{display:inline-block;width:14px;height:8px;border-radius:4px;margin-right:6px;vertical-align:middle}
+.race-clock{font:500 13px var(--f-mono);color:var(--fog);font-variant-numeric:tabular-nums}
+
+/* ---------- 14 verified ---------- */
+.ver{display:grid;grid-template-columns:minmax(0,.85fr) minmax(0,1.35fr);gap:clamp(20px,3vw,52px);align-items:start}
+.ver>*{min-width:0}
+.tla{padding:22px}
+.tla ul{list-style:none;margin:14px 0 0;padding:0;display:grid;gap:8px}
+.tla li{display:grid;grid-template-columns:auto 1fr;gap:2px 12px;align-items:baseline;padding:10px 12px;border-radius:12px;background:var(--ink-2);border:1px solid var(--line)}
+.tla li code{font:600 13.5px var(--f-mono);color:var(--core)}
+.tla li span{font-size:13.5px;color:var(--fog)}
+.cgrid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:8px}
+.cc{position:relative;display:grid;grid-template-columns:58px 1fr 22px;gap:12px;align-items:center;padding:11px 13px;border-radius:12px;border:1px solid var(--line);background:rgba(17,29,42,.75);transition:border-color .35s,background .35s;cursor:help}
+.cc .rn{font:650 14px var(--f-body);color:var(--fog);white-space:nowrap}
+.cc:hover,.cc:focus-visible{border-color:var(--ember)}
+.cc .tip{position:absolute;left:8px;right:8px;bottom:calc(100% + 8px);z-index:8;padding:12px 14px;border-radius:12px;background:var(--ink);border:1px solid rgba(251,146,60,.55);box-shadow:0 18px 50px rgba(0,0,0,.55);
+  font-size:14px;line-height:1.5;color:var(--paper);opacity:0;pointer-events:none;transform:translateY(6px);transition:opacity .18s,transform .18s}
+.cc .tip small{display:block;margin-top:6px;color:var(--dim);font-size:12.5px}
+.cc:hover .tip,.cc:focus-visible .tip{opacity:1;transform:none}
+.cc span{font-size:14px;line-height:1.35;color:var(--fog)}
+.cc .ok{width:20px;height:20px;border-radius:50%;border:1.5px solid var(--line);display:grid;place-items:center;font:700 11px var(--f-mono);color:transparent;transition:all .35s}
+.cc.lit{border-color:rgba(251,146,60,.5);background:rgba(249,115,22,.08)}
+.cc.lit .rn{color:var(--core)}.cc.lit>span{color:var(--paper)}
+.cc.lit .ok{background:var(--molten);border-color:var(--molten);color:#1B0C03}
+
+/* ---------- 15 fits-in ---------- */
+.orbit{position:relative;height:clamp(340px,52vh,520px)}
+.orbit .ctr{position:absolute;left:50%;top:50%;width:34%;max-width:210px;transform:translate(-50%,-52%);z-index:2}
+.orbit .eng{position:absolute;left:0;top:0;font:650 clamp(14px,1.2vw,18px) var(--f-body);padding:8px 14px;border-radius:999px;background:rgba(17,29,42,.88);border:1px solid var(--line);white-space:nowrap;will-change:transform;cursor:default}
+.orbit .eng small{font:500 11px var(--f-mono);color:var(--dim);margin-left:6px}
+.fit{display:grid;gap:22px}
+.fit h3{font-size:17px;margin-bottom:8px}
+.chips{display:flex;flex-wrap:wrap;gap:8px}
+.chip{font:550 13.5px var(--f-mono);padding:8px 12px;border-radius:10px;border:1px solid var(--line);background:var(--ink-2);color:var(--paper)}
+.verbs .chip{color:var(--core);border-color:rgba(251,146,60,.45)}
+.rm-teaser{padding-top:20px;border-top:1px solid var(--line)}
+.rm-teaser .btn{margin-top:14px}
+dialog.rm{width:min(1120px,calc(100vw - 32px));max-height:calc(100vh - 48px);padding:0;border:1px solid var(--line);border-radius:20px;background:var(--ink);color:var(--paper);box-shadow:0 30px 90px rgba(0,0,0,.6)}
+dialog.rm::backdrop{background:rgba(5,10,16,.72);backdrop-filter:blur(4px)}
+.rm-head{position:sticky;top:0;z-index:1;display:flex;justify-content:space-between;align-items:center;padding:16px 24px;border-bottom:1px solid var(--line);background:var(--ink)}
+.rm-head h2{margin:0;font:720 24px var(--f-display)}
+.rm-body{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:14px;padding:22px 24px 26px}
+.rm-item{border:1px solid var(--line);border-radius:16px;padding:18px 20px;background:var(--ink-2);min-width:0}
+.rm-item h3{margin:0 0 8px;font-size:18px}
+.rm-item p{margin:0;color:var(--fog);font-size:14.5px;line-height:1.55}
+.rm-item .rm-st{margin-bottom:8px;font-size:13px;color:var(--core)}
+.rm-lead{grid-column:1/-1;display:grid;grid-template-columns:minmax(0,1fr) minmax(0,1.15fr);gap:28px;align-items:start}
+.rm-lead .pv{margin-bottom:10px}
+.rm-lead .pool-stats{margin:16px 0 12px}
+.rm-lead .controls{margin-top:12px}
+.fit p{margin:8px 0 0;color:var(--fog);font-size:15px;line-height:1.5;max-width:54ch}
+
+/* ---------- 16 quick start ---------- */
+.prompt{padding:20px 22px;margin-bottom:14px}
+.prompt pre{margin:0 0 16px;font:450 clamp(13px,1vw,15px)/1.65 var(--f-mono);white-space:pre-wrap;color:var(--paper);overflow-wrap:anywhere}
+.term{overflow:hidden}
+.term-head{display:flex;justify-content:space-between;align-items:center;padding:12px 18px;border-bottom:1px solid var(--line);font:500 12.5px var(--f-mono);color:var(--dim)}
+.term-body{margin:0;padding:18px;font:450 clamp(12px,.92vw,14px)/1.75 var(--f-mono);overflow-x:auto;white-space:pre;color:var(--paper)}
+.term-body .c{color:var(--dim)}.term-body .p{color:var(--molten)}
+.caret{display:inline-block;width:.6em;height:1.1em;background:var(--core);vertical-align:-.2em;animation:blink 1s steps(1) infinite}
+@keyframes blink{50%{opacity:0}}
+
+/* ---------- use it today ---------- */
+.use{display:grid;grid-template-columns:minmax(0,1fr) minmax(0,1.05fr);gap:clamp(24px,4vw,64px);align-items:start}
+.use>*{min-width:0}
+.use .links{margin-top:18px;grid-template-columns:repeat(2,minmax(0,1fr))}
+.use-r{display:grid;gap:14px;min-width:0}
+.cite{padding:14px 18px;min-width:0}
+.cite-h{display:flex;align-items:center;gap:12px;flex-wrap:wrap;margin-bottom:10px}
+.cite-h b{font:640 15px var(--f-body);margin-right:auto}
+.cite pre{margin:0;font:450 12.5px/1.6 var(--f-mono);color:var(--fog);white-space:pre-wrap;overflow-wrap:anywhere}
+/* results: both figures on one slide */
+.res-figs{display:grid;gap:16px}
+.res-figs .fplate{padding:clamp(16px,1.8vw,24px)}
+/* preview tag on the agent-team slide */
+.pv{display:flex;align-items:center;gap:10px;margin:0 0 14px;color:var(--fog);font-size:14px}
+.pv span{font:600 13px var(--f-body);color:var(--core);padding:4px 10px;border-radius:999px;border:1px solid rgba(251,146,60,.5);background:rgba(249,115,22,.1)}
+.pool-stats{grid-template-columns:repeat(3,minmax(0,1fr))}
+.pool-stats .stat b{font-size:clamp(22px,2vw,34px);white-space:nowrap}
+.pool-stats .stat span{display:block;margin-top:6px;font-size:13px;line-height:1.4}
+.links{display:grid;gap:8px}
+.links a{display:flex;justify-content:space-between;align-items:center;gap:12px;padding:14px 16px;border-radius:14px;border:1px solid var(--line);background:rgba(17,29,42,.72);color:var(--paper);text-decoration:none;transition:border-color .2s,background .2s}
+.links a:hover{border-color:var(--ember);background:rgba(249,115,22,.08)}
+.links a b{font:620 15.5px var(--f-body)}
+.links a small{display:block;color:var(--fog);font-size:13.5px;margin-top:2px}
+.links a svg{flex:none;width:18px;height:18px;color:var(--core)}
+.foot{display:flex;justify-content:space-between;gap:16px;flex-wrap:wrap;margin-top:44px;padding-top:18px;border-top:1px solid var(--line);color:var(--dim);font-size:13.5px}
+.foot a{color:var(--fog)}
+
+/* ---------- responsive ---------- */
+@media (max-width:1100px){.rm-body{grid-template-columns:repeat(2,minmax(0,1fr))}}
+@media (max-width:640px){.rm-body,.rm-lead{grid-template-columns:minmax(0,1fr)}.use .links,.pool-stats{grid-template-columns:minmax(0,1fr)}}
+@media (max-width:1100px){
+  .lc{grid-template-columns:minmax(0,1fr)}
+  .lc-rail{grid-template-columns:repeat(3,minmax(0,1fr))}
+  .lc-rail li span{display:none}
+  .lc-rail li{grid-template-columns:30px 1fr;align-items:center}
+  .lc-rail li::before{grid-row:auto}
+}
+@media (max-width:900px){
+  .split,.title-grid,.lad-grid,.arch,.pool,.ver,.use,.swap{grid-template-columns:minmax(0,1fr)}
+  .title-grid>.hero-demo{order:2}
+  .ladder{grid-template-columns:minmax(0,1fr);gap:14px}
+  .lad-lines,.rpk{display:none}
+  .edits .tip{display:none}
+  .logo-stage{max-width:260px}
+  .stages{grid-template-columns:1fr}
+  .nest-node{grid-template-columns:minmax(0,1fr)}
+  .cgrid{grid-template-columns:1fr}
+}
+@media (max-width:640px){
+  .slide{padding-top:calc(env(safe-area-inset-top,0px) + 118px);padding-bottom:56px}
+  .lc-ranks{grid-template-columns:repeat(2,minmax(0,1fr))}
+  .lc-row1{flex-direction:column;gap:30px}
+  #lcAgent,#lcBox{max-width:none}
+  .rung,.axis{grid-template-columns:16px minmax(0,1fr)}
+  .rung .track,.axis .ax{grid-column:2}
+  .axis>div:nth-child(2){display:none}
+  .lad-div{margin-left:30px}
+  .row,.chart-axis{grid-template-columns:minmax(0,1fr) 78px;gap:6px 10px}
+  .row .bars,.chart-axis .ax{grid-column:1/-1;grid-row:2}
+  .chart-axis>div:first-child,.chart-axis>div:last-child{display:none}
+  .nb{padding:28px 8px 8px}
+  .nest-cp,.nest-ver{grid-template-columns:auto minmax(0,1fr)}
+  .nest-cp em,.nest-ver em{grid-column:1/-1}
+  .readout{grid-template-columns:1fr}
+  .readout .rl-t{grid-row:auto}
+  .mech{grid-template-columns:repeat(2,minmax(0,1fr))}
+  .mech-read{min-height:4.35em}
+  .mod{grid-template-columns:74px minmax(0,1fr)}
+  .mod .v{grid-column:2}
+  .slide{min-height:0}
+}
+@media (prefers-reduced-motion:reduce){
+  .slide.seen [data-a]{animation:none}
+  .js .slide:not(.seen) [data-a]{opacity:1}
+  html{scroll-behavior:auto}
+  .lg-hover,.lg-glow,.seen .lg-drop,.blk.weights .wgrid i,.caret{animation:none}
+  .nb,.nchip{transition:none}
+}
+</style>
+
+</head>
+<body>
+<canvas id="heat" aria-hidden="true"></canvas>
+<div class="vignette" aria-hidden="true"></div>
+<a class="skip" href="#overhead">Skip to content</a>
+<header class="site-head">
+  <a class="mark" href="#rsibox" aria-label="RSIBox home"><span id="markLogo"></span><span><span class="rsi">RSI</span><span class="bx">Box</span></span></a>
+  <nav class="site-nav" id="siteNav" aria-label="Sections">
+    <a href="#overhead" data-g="why">Why</a><a href="#swap-what-changed" data-g="how">How it works</a><a href="#architecture" data-g="arch">Architecture</a><a href="#verified" data-g="ver">Verification</a><a href="#results" data-g="res">Results</a><a href="#quick-start" data-g="start">Get started</a>
+  </nav>
+  <a class="btn gh" href="https://github.com/hao-ai-lab/rsibox" target="_blank" rel="noopener"><svg viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><path d="M12 2C6.48 2 2 6.58 2 12.25c0 4.53 2.87 8.37 6.84 9.73.5.09.68-.22.68-.49v-1.7c-2.78.62-3.37-1.37-3.37-1.37-.45-1.18-1.11-1.5-1.11-1.5-.91-.64.07-.62.07-.62 1 .07 1.53 1.06 1.53 1.06.89 1.57 2.34 1.12 2.91.85.09-.66.35-1.12.63-1.37-2.22-.26-4.56-1.14-4.56-5.07 0-1.12.39-2.04 1.03-2.76-.1-.26-.45-1.3.1-2.71 0 0 .84-.28 2.75 1.05A9.4 9.4 0 0 1 12 6.9c.85 0 1.71.12 2.51.34 1.91-1.33 2.75-1.05 2.75-1.05.55 1.41.2 2.45.1 2.71.64.72 1.03 1.64 1.03 2.76 0 3.94-2.34 4.8-4.57 5.06.36.32.68.94.68 1.9v2.81c0 .27.18.59.69.49A10.1 10.1 0 0 0 22 12.25C22 6.58 17.52 2 12 2z"/></svg><span>GitHub</span></a>
+</header>
+
+<main class="deck" id="deck">
+
+<!-- 1 -->
+<section class="slide" id="rsibox" data-temp=".72" data-title="RSIBox" data-g="">
+  <div class="wrap title-grid">
+    <div class="hero-demo" data-a>
+      <div class="logo-stage" id="titleLogo"></div>
+      <p class="mech-read" id="mechRead" aria-live="polite">Ready: the engine is running with its state warm on the GPU. Press a button.</p>
+      <div class="mech" role="group" aria-label="Try the core mechanisms">
+        <button class="mbtn" data-m="edit"><b>Ship an edit</b><small>hot-reload a function, ~70 ms</small></button>
+        <button class="mbtn" data-m="graph"><b>Edit a graph path</b><small>recapture only its CUDA graphs</small></button>
+        <button class="mbtn" data-m="check"><b>Check it</b><small>prove the new code ran</small></button>
+        <button class="mbtn" data-m="crash"><b>Crash it</b><small>promote the warm standby</small></button>
+        <button class="mbtn" data-m="undo"><b>Undo</b><small>replay the journal to base</small></button>
+        <button class="mbtn" data-m="cold"><b>Cold restart</b><small>for contrast: 228 s</small></button>
+      </div>
+      <p class="mech-cap">The orange cube is the running engine, the box under it is its warm GPU state (weights, KV cache, imports, CUDA graphs), and the small dashed cube is a warm standby.</p>
+    </div>
+    <div>
+      <h1 class="wordmark" data-a><span class="rsi">RSI</span><span class="bx">Box</span></h1>
+      <p class="hero-line" data-a>Keep the weights warm while AI agents rewrite the engine.</p>
+      <p class="lead" data-a>A live hot-reload sandbox and multi-agent GPU pool for production ML engines. Agents edit vLLM, SGLang, Megatron-LM and seven more engines in place, and see the result in milliseconds instead of minutes. Built at Hao AI Lab, v0.0.2.</p>
+      <div class="controls" data-a><a class="btn hot" href="#quick-start">Get started</a><a class="btn" href="#swap-what-changed">See how it works</a></div>
+    </div>
+  </div>
+</section>
+
+<!-- 2 -->
+<section class="slide" id="overhead" data-temp=".04" data-title="System overhead" data-g="why">
+  <div class="wrap">
+    <h2 class="h" data-a>RSI is bottlenecked by system overhead</h2>
+    <p class="lead" data-a><b>RSI</b>, recursive self-improvement, means AI agents improving the software that runs AI. Two measurements show where an agent’s clock goes. It spends most of a run waiting on evaluation, not generating tokens, so a faster model barely helps. And most of each evaluation is the engine starting up again.</p>
+    <div class="fig-pair">
+      <div class="fig-step" data-a><p class="fig-cap"><span>1</span>Evaluation, not the model, sets the pace</p><div data-fig="bottleneck"></div></div>
+      <div class="fig-step" data-a><p class="fig-cap"><span>2</span>Inside each evaluation, start-up dominates</p><div data-fig="overhead"></div></div>
+    </div>
+    <p class="guide" data-a><span><b>What you’re seeing:</b> on the left, a real 6-hour vLLM run replayed with faster models: the run barely gets shorter. On the right, one check on each engine: rust is the engine starting up, blue is the test itself. <b>Try:</b> pick a model speed, switch to share of the check, or click an engine to see where its start-up goes.</span></p>
+  </div>
+</section>
+
+<!-- 3 -->
+<section class="slide" id="one-line" data-temp=".1" data-title="Overhead can be cut" data-g="why">
+  <div class="wrap">
+    <div class="split" style="align-items:end;margin-bottom:26px">
+      <div>
+        <h2 class="h" data-a>But most system overhead can be mitigated</h2>
+        <p class="lead" data-a style="margin-bottom:0">None of the start-up depends on the line that changed. Testing a one-line change to vLLM’s scheduler takes 228 s with a restart. Keep the tuned kernels, the weights, the CUDA graphs and the process warm, and the same check takes 24 s. Shrink the test to a small probe and it takes 2.4 s.</p>
+      </div>
+      <div class="diff panel ec" id="editCard" data-a aria-live="polite">
+        <div class="code-head"><span>the edit being tested</span><span data-eng>vLLM</span></div>
+        <div class="ec-body">
+          <b data-what>One edit to vLLM’s scheduler</b>
+          <p data-setup>Nemotron 3.5 Super NVFP4 with vLLM serve on one GB200</p>
+          <dl><dt>Restart per check</dt><dd class="cold" data-r>228 s</dd><dt>Fastest check</dt><dd class="warm" data-l>2.4 s</dd></dl>
+          <p class="ec-hint">Each engine was measured on its own edit. Switch engines in the figure below.</p>
+        </div>
+      </div>
+    </div>
+    <div data-fig="ladder" data-a></div>
+    <p class="guide" data-a><span><b>What you’re seeing:</b> the same edit tested again and again, each row removing one more restart cost. Rust is start-up work the edit never needed; blue is the test itself. <b>Try:</b> switch engines, hover a bar segment, or click a row to see what it removed.</span></p>
+  </div>
+</section>
+
+<!-- 4 -->
+<section class="slide" id="swap-what-changed" data-temp=".76" data-title="Swap only what changed" data-g="how">
+  <div class="wrap">
+    <h2 class="h sm" data-a style="max-width:none">Swap only what changed. Keep everything else running.</h2>
+    <p class="lead" data-a>An agent doing RSI proposes one change after another. rsibox ships each change into the running engine and swaps only the code it touches. Weights, compiled kernels, CUDA graphs and live requests stay where they are.</p>
+    <div class="swap">
+      <div class="ap panel" data-a>
+        <div class="code-head"><span>coding agent, improving vLLM</span><span id="apIdx">idea 1 of 4</span></div>
+        <div class="ap-body">
+          <p class="ap-think" id="apThink"></p>
+          <div class="ap-diff" id="apDiff"><div class="code-head"><span id="apFile">sampler.py</span><span id="apKind">Python</span></div><pre class="code" id="apCode"></pre></div>
+          <p class="ap-cmd" id="apCmd"></p>
+          <div class="ap-res" id="apRes"></div>
+        </div>
+        <div class="ap-foot">
+          <button class="btn" id="apPause" aria-pressed="false">Pause</button>
+          <button class="btn" id="apNext">Next idea</button>
+          <button class="btn" id="apCold">Compare with a cold restart</button>
+          <span class="ap-dots" id="apDots"><i></i><i></i><i></i><i></i></span>
+        </div>
+      </div>
+      <div class="engine panel" id="engine" data-a>
+        <div class="eng-head"><span>vLLM on GPU 0, serving</span><span id="engState" class="pill good">warm</span></div>
+        <div class="mem">
+          <div class="blk weights"><b>Model weights</b><small>minutes to load from disk</small><span class="kept">kept</span><div class="wgrid" id="wgrid"></div></div>
+          <div class="blk"><b>Compiled kernels</b><small>torch.compile, Triton</small><span class="kept">kept</span></div>
+          <div class="blk"><b>CUDA graphs</b><span class="kept" id="graphKept">kept</span><div class="cells" id="gcells"></div></div>
+          <div class="blk"><b>KV cache</b><small>live requests</small><span class="kept">kept</span></div>
+        </div>
+        <div class="mods" id="mods"><div class="ml">code the agent can change</div></div>
+        <div class="eng-foot">
+          <div><small id="engTimeL">Time until the edit runs</small><b id="engTime">0 s</b></div>
+          <div class="eng-count" id="engCount">edits shipped 0<br>restarts 0</div>
+        </div>
+      </div>
+    </div>
+    <p class="guide" data-a><span><b>What you’re seeing:</b> the agent writes a diff, ships it with <span class="k">rsibox install</span>, and only the matching row on the right lights up. The warm state above it never reloads. <b>Try:</b> Next idea, or compare with a cold restart.</span></p>
+    <p class="note" style="margin-top:10px" data-a>The agent’s edits are illustrative. Each latency is the README’s figure for that kind of change.</p>
+  </div>
+</section>
+
+<!-- 5 -->
+<section class="slide" id="tiers" data-temp=".6" data-title="Cheapest safe path" data-g="how">
+  <div class="wrap">
+    <h2 class="h" data-a>Each edit takes the cheapest safe path</h2>
+    <div class="lad-grid">
+      <div data-a>
+        <p class="lead">rsibox reads the diff, works out what kind of change it is, and routes it to the cheapest tier that can apply it safely. Hover an edit to see its diff. Click to route it.</p>
+        <div class="edits" id="edits"></div>
+      </div>
+      <div data-a>
+        <div class="ladder panel" id="ladder"></div>
+        <div class="readout panel" id="readout" aria-live="polite"></div>
+      </div>
+    </div>
+    <p class="guide" data-a><span><b>What you’re seeing:</b> each row is a tier. Its bar shows how long that tier takes, on a log scale, next to the 228 s cold restart. The router picks the row. <b>Try:</b> click “Change a .cu kernel” and compare it with “Raise max_num_seqs”.</span></p>
+  </div>
+</section>
+
+<!-- 6 -->
+<section class="slide" id="lifecycle" data-temp=".82" data-title="Life of a live edit" data-g="how">
+  <div class="wrap lc">
+    <div>
+      <h2 class="h sm" data-a>Life of a live edit</h2>
+      <p class="lead" data-a>Follow one <span class="k">rsibox install</span> from the agent to four GPUs. The engine keeps stepping the whole time. Before changing anything, each rank writes down how to reverse it, so <span class="k">rsibox uninstall</span> can put the exact original code back in about 0.05 s, with no restart. Failures leave nothing half done: one refusing rank aborts the edit everywhere, and a crashed worker is replaced by a warm standby.</p>
+      <ol class="lc-rail" id="lcRail" data-a>
+        <li tabindex="0" role="button"><b>Stage</b><span>Read and check the edit while GPUs keep working</span></li>
+        <li tabindex="0" role="button"><b>Prepare</b><span>Ask every rank if it can apply it</span></li>
+        <li tabindex="0" role="button"><b>Commit</b><span>Swap all ranks together in a step gap</span></li>
+        <li tabindex="0" role="button"><b>Prove it ran</b><span>Count calls to the new code on every rank</span></li>
+        <li tabindex="0" role="button"><b>Undo</b><span>Replay each rank’s undo log newest first and restore the original code, Triton binaries and CUDA graphs</span></li>
+        <li tabindex="0" role="button"><b>Recover</b><span>A worker crashes: block edits, then promote a warm standby that already holds the weights</span></li>
+      </ol>
+    </div>
+    <div data-a>
+      <div class="lc-stage panel" id="lcStage">
+        <svg class="lc-lines" id="lcLines" aria-hidden="true"></svg>
+        <div class="lc-row1">
+          <div class="lc-node" id="lcAgent"><small>coding agent</small><code id="lcCmd">$ waiting</code><div class="lc-res" id="lcRes"></div></div>
+          <div class="lc-node" id="lcBox"><small>layer 1, control plane</small><b>rsibox HTTP box</b></div>
+        </div>
+        <div class="lc-row2"><div class="lc-node" id="lcCoord"><small>layer 2, hot-reload kernel</small><b>Coordinator</b><ul class="lc-log" id="lcLog"></ul></div></div>
+        <div class="lc-ranks" id="lcRanks"></div>
+      </div>
+      <div class="lc-bottom">
+        <p class="lc-narr" id="lcNarr" aria-live="polite">Press play to send an edit.</p>
+        <div class="controls">
+          <button class="btn hot" id="lcPlay">Play the lifecycle</button>
+          <button class="btn" id="lcStep">Next phase</button>
+          <button class="btn" id="lcUndo" disabled>Undo the edit</button>
+          <button class="btn" id="lcFault" aria-pressed="false">Make GPU 2 refuse</button>
+          <button class="btn" id="lcCrash">Crash GPU 2</button>
+          <button class="btn" id="lcReset">Reset</button>
+        </div>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- 7 -->
+<section class="slide" id="architecture" data-temp=".72" data-title="Architecture" data-g="arch">
+  <div class="wrap">
+    <h2 class="h sm" data-a>RSIBox architecture</h2>
+    <p class="lead" data-a>An engine is boxes inside boxes, and restarting a box throws away everything inside it. RSIBox restarts the smallest box that holds the change. Its four layers split that job: one decides, one swaps, one keeps the GPU state warm, one knows each engine.</p>
+    <div class="arch">
+      <div class="nest-wrap" data-a>
+        <div class="nest-cp" data-o="1"><span class="own">1</span><b>Control plane</b><em>rsibox CLI and HTTP box: picks the smallest box for each edit and refuses edits it can’t place</em></div>
+        <div class="nest-node">
+          <div class="nb" data-b="engine"><span class="nb-t"><b>Engine</b><i data-t></i></span>
+            <div class="nb" data-b="worker"><span class="nb-t"><b>Worker process, one per GPU</b><i data-t></i></span>
+              <div class="nb-state"><span class="nchip" data-b="weights">Weights<small>held by layer 3</small></span><span class="nchip" data-b="kv">KV cache</span></div>
+              <div class="nb" data-b="native"><span class="nb-t"><b>Native .cu kernels</b><i data-t></i></span>
+                <div class="nb" data-b="graphs"><span class="nb-t"><b>CUDA graphs</b><i data-t></i></span>
+                  <div class="nb" data-b="code"><span class="nb-t"><b>Python and Triton code</b><i data-t></i></span></div>
+                </div>
+              </div>
+            </div>
+          </div>
+          <div class="nest-warm" data-o="3"><span class="own">3</span><b>Warm foundation</b>
+            <span class="nchip">Weights in GPU memory</span><span class="nchip">Pre-imported fork server</span><span class="nchip">Standby shadow worker</span><span class="nchip">Dynamo GMS + snapshot</span>
+            <em>Lives outside the engine, so it survives a worker restart.</em></div>
+        </div>
+        <div class="nest-ver" data-o="x"><span class="own">✓</span><b>Verification</b><em>TLA+ protocol models and the 11-rule sandbox suite check every boundary before a number counts.</em></div>
+      </div>
+      <div class="bnd-side" data-a>
+        <ol class="bnd-list" id="bndList">
+          <li data-k="code" tabindex="0" role="button"><b>Python and Triton code</b><span>58–92 ms</span></li>
+          <li data-k="graphs" tabindex="0" role="button"><b>CUDA graphs</b><span>0.50–3.69 s</span></li>
+          <li data-k="native" tabindex="0" role="button"><b>Native .cu kernels</b><span>7.3–19.2 s</span></li>
+          <li data-k="worker" tabindex="0" role="button"><b>Worker process</b><span>0.10–1.86 s</span></li>
+          <li data-k="engine" tabindex="0" role="button"><b>Whole engine, from snapshot</b><span>3.6–5.2 s</span></li>
+        </ol>
+        <p class="bnd-note">No boundary falls back to a cold restart. Without RSIBox, every one of these edits costs 228 s.</p>
+        <div class="bnd-card" id="bndCard" aria-live="polite"></div>
+        <div class="bnd-owners"><span data-o="1"><i>1</i>Control plane</span><span data-o="2"><i>2</i>Hot-reload kernel</span><span data-o="3"><i>3</i>Warm recovery</span><span data-o="4"><i>4</i>Engine adapters</span></div>
+      </div>
+    </div>
+    <p class="guide" data-a><span><b>What you’re seeing:</b> one engine drawn as nested boxes. Picking a restart boundary turns everything inside it cold blue: that is what gets rebuilt. Everything outside stays warm orange. <b>Try:</b> click each boundary from the smallest to the whole engine. Even the largest keeps the weights warm.</span></p>
+  </div>
+</section>
+
+<!-- 8 -->
+<section class="slide" id="verified" data-temp=".58" data-title="Verified" data-g="ver">
+  <div class="wrap">
+    <h2 class="h" data-a>Verified by a model checker and a test suite</h2>
+    <p class="lead" data-a>The core protocols are written in TLA+, a language for describing a protocol precisely enough that a model checker can try every ordering of events and look for one that breaks a rule. Every engine adapter must then pass the sandbox verification suite before its numbers count.</p>
+    <div class="ver">
+      <div class="tla panel" data-a>
+        <h3>Protocol models in TLA+</h3>
+        <ul>
+          <li><code>SwapLifecycle</code><span>the swap and undo protocol</span></li>
+          <li><code>Coordinator</code><span>agreement across GPU ranks</span></li>
+          <li><code>SandboxPool</code><span>sharing GPUs among agents</span></li>
+          <li><code>StandbyShadow</code><span>failover to a parked standby</span></li>
+          <li><code>PoolAutoScaler</code><span>growing and shrinking the pool</span></li>
+        </ul>
+      </div>
+      <div data-a>
+        <div class="cgrid" id="cgrid"></div>
+        <div class="controls" style="margin-top:12px"><button class="btn" id="cRun">Run the suite again</button><span class="note">Hover a rule to see exactly what it checks.</span></div>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- 9 -->
+<section class="slide" id="results" data-temp=".88" data-title="Results" data-g="res">
+  <div class="wrap">
+    <h2 class="h sm" data-a>RSIBox cuts edit-and-test time by 87–97%</h2>
+    <p class="lead" data-a>Testing one edit with a full check takes 87–97% less time than restarting first, across serving, training, video generation and RL post-training. A targeted probe cuts it by up to 99%. In races with the same agent, the shorter loop gets it to the best result sooner.</p>
+    <div class="res-figs">
+      <div data-fig="engines" data-a></div>
+      <div data-fig="raceGrid" data-a></div>
+    </div>
+  </div>
+</section>
+
+<!-- 10 -->
+<section class="slide" id="fits-in" data-temp=".7" data-title="Fits your stack" data-g="start">
+  <div class="wrap split">
+    <div class="orbit" id="orbit" data-a><div class="ctr" id="orbitLogo"></div></div>
+    <div>
+      <h2 class="h" data-a>Works on the engine you already run</h2>
+      <div class="fit" data-a>
+        <div><h3>Launch it where your GPUs are</h3><div class="chips"><span class="chip">local process</span><span class="chip">Docker</span><span class="chip">gVisor (runsc)</span><span class="chip">Slurm</span></div></div>
+        <div><h3>Drive it from any coding agent</h3><div class="chips verbs"><span class="chip">install</span><span class="chip">check</span><span class="chip">reset</span><span class="chip">uninstall</span><span class="chip">status</span></div><p>Five verbs over an authenticated HTTP API. When something fails, rsibox rolls back or recovers, depending on what broke.</p></div>
+        <div><h3>Keep your battle-tested fork</h3><p>Production engines carry years of in-house logic. Toolsmith agents make an existing codebase live-editable without invasive source changes.</p></div>
+        <div class="rm-teaser"><h3>What’s next</h3><p>Many agents sharing a few warm GPUs, CUDA graphs patched without recapture, Kubernetes, and live editing beyond LLMs.</p><button class="btn hot" id="rmOpen" aria-haspopup="dialog">See the roadmap</button></div>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- 11 -->
+<section class="slide" id="quick-start" data-temp="1" data-title="Use it today" data-g="start">
+  <div class="wrap">
+    <div class="use">
+      <div>
+        <h2 class="h" data-a>Use it today</h2>
+        <p class="lead" data-a>Paste this into your coding agent. It installs rsibox and learns to hot-reload instead of restarting.</p>
+        <div class="prompt panel" data-a>
+<pre id="agentPrompt">Install https://github.com/hao-ai-lab/rsibox.git
+and read core/agents/livelab_overview.md.
+
+Whenever you edit / benchmark / profile an ML engine,
+use rsibox to hot-reload and verify changes in-place instead of restarting.</pre>
+          <div class="controls"><button class="btn hot" id="copyPrompt">Copy prompt</button><span class="note" id="copyMsg" aria-live="polite"></span></div>
+        </div>
+        <p class="note" data-a>Or install it as a skill: <span class="k">core/agents/livelab_overview.md</span> already ships with SKILL.md frontmatter.</p>
+        <div data-a>
+<div class="links">
+        <a href="https://github.com/hao-ai-lab/rsibox" target="_blank" rel="noopener"><span><b>Source on GitHub</b><small>hao-ai-lab/rsibox, Apache 2.0</small></span><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M7 17L17 7M9 7h8v8"/></svg></a>
+        <a href="https://github.com/hao-ai-lab/rsibox/blob/main/docs/quickstart.md" target="_blank" rel="noopener"><span><b>Quick start</b><small>Bring up a warm engine and make a first edit</small></span><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M7 17L17 7M9 7h8v8"/></svg></a>
+        <a href="https://github.com/hao-ai-lab/rsibox/blob/main/docs/concepts.md" target="_blank" rel="noopener"><span><b>Concepts</b><small>Tiers, the coordinator, witnesses and the journal</small></span><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M7 17L17 7M9 7h8v8"/></svg></a>
+        <a href="https://github.com/hao-ai-lab/rsibox/blob/main/docs/engines.md" target="_blank" rel="noopener"><span><b>Supported engines</b><small>What each of the 10 adapters can hot-reload</small></span><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M7 17L17 7M9 7h8v8"/></svg></a>
+      </div>
+        </div>
+      </div>
+      <div class="use-r">
+        <div class="term panel" data-a>
+          <div class="term-head"><span>manual setup, vLLM on GPU 0</span><button class="btn" id="termReplay" style="padding:7px 12px;font-size:12.5px">Type it again</button></div>
+          <pre class="term-body" id="term"></pre>
+        </div>
+        <div class="cite panel" data-a>
+          <div class="cite-h"><b>Cite RSIBox</b><button class="btn" id="copyCite" style="padding:7px 12px;font-size:12.5px">Copy BibTeX</button><span class="note" id="citeMsg" aria-live="polite"></span></div>
+<pre id="bib">@misc{rsibox2026,
+  title        = {Towards Live-Editable {LLM} Infra for {RSI}},
+  author       = {Chen, Junda and Sun, Yi and Zhang, Yuxuan and Yang, Yuanbo and Su, Junda and Lin, Will and Zhang, Hao},
+  year         = {2026},
+  month        = nov,
+  howpublished = {Hao AI Lab Blog},
+  url          = {https://haoailab.com/blogs/rsibox/}
+}</pre>
+        </div>
+      </div>
+    </div>
+    <div class="foot"><span>RSIBox is built at Hao AI Lab and released under Apache 2.0.</span><span>Part of <a href="https://fastrsi.ai/">FastRSI</a></span></div>
+  </div>
+</section>
+
+
+<dialog class="rm" id="roadmap" aria-labelledby="rmTitle">
+  <div class="rm-head"><h2 id="rmTitle">Roadmap</h2><button class="btn" id="rmClose">Close</button></div>
+  <div class="rm-body">
+    <article class="rm-item rm-lead">
+      <div>
+        <p class="pv"><span>Preview</span>In testing, not yet in the release</p>
+        <h3>Many agents, a few warm GPUs</h3>
+        <p>An agent spends most of its time thinking, not testing. <b>SandboxPool</b> leases each check a warm GPU for under a second, so one GPU can serve a whole team. Waiting agents gain priority so nobody starves, and an agent that keeps crashing workers is cut off from more than one GPU. Next: run it inside serverless and microVM sandboxes.</p>
+        <div class="pool-stats">
+          <div class="stat"><b>8 agents</b><span>on one B200 with 3–5 s of think time, 0.02 ms mean wait for a GPU</span></div>
+          <div class="stat"><b>19×</b><span>more edits per minute on 1 GPU than restarting for every check on 3 GPUs</span></div>
+          <div class="stat"><b>0.68–0.75 s</b><span>to replace a crashed worker from a standby, instead of 36–40 s</span></div>
+        </div>
+        <p class="note">From our B200 study with scripted agents running fixed edits, not LLM-written code: <span class="k">docs/agent-teams-and-contention.md</span>.</p>
+      </div>
+      <div>
+<div class="pool-viz panel">
+        <div class="pool-q" id="poolQ"><span class="ql">waiting</span></div>
+        <div class="slots" id="poolSlots"></div>
+        <div class="pool-live"><span>edits finished <b id="poolDone">0</b></span><span>faults contained <b id="poolFaults">0</b></span></div>
+      </div>
+        <div class="controls"><button class="btn" id="poolAdd">Add an agent</button><button class="btn hot" id="poolRogue">Let one agent go rogue</button></div>
+      </div>
+    </article>
+    <article class="rm-item"><p class="rm-st">In progress</p><h3>Patch CUDA graphs without recapture</h3><p>Update kernel parameters inside a live CUDA graph instead of recapturing it. vLLM does this today and falls back to a recapture when it can’t; the work is to make it general.</p></article>
+    <article class="rm-item"><p class="rm-st">In progress</p><h3>Clusters and Kubernetes</h3><p>A native Kubernetes launcher (<span class="k">--launcher k8s</span>) and warm recovery across nodes for training and RL.</p></article>
+    <article class="rm-item"><p class="rm-st">In progress</p><h3>Knowledge bases and toolsmiths</h3><p>Reorganized per-engine knowledge bases and a shorter path for toolsmith agents to make a new engine live-editable.</p></article>
+    <article class="rm-item"><p class="rm-st">In progress</p><h3>Robotics and science</h3><p>Deeper live editing for Isaac Lab and other GPU simulation stacks beyond LLMs.</p></article>
+  </div>
+</dialog>
+</main>
+
+<script>
+(()=>{
+'use strict';
+const $=(s,r=document)=>r.querySelector(s), $$=(s,r=document)=>[...r.querySelectorAll(s)];
+const reduce = matchMedia('(prefers-reduced-motion: reduce)').matches;
+const SVGNS='http://www.w3.org/2000/svg';
+const ease=p=>p<.5?4*p*p*p:1-Math.pow(-2*p+2,3)/2;
+
+/* ---------- scopes: everything a slide starts is cancelled when it leaves ---------- */
+function scope(){
+  const T=new Set(),I=new Set(),R=new Set(),A=new Set(),C={};let dead=false;
+  const s={
+    get dead(){return dead},
+    wait(ms){return new Promise(res=>{if(dead)return;const id=setTimeout(()=>{T.delete(id);if(!dead)res();},ms);T.add(id);});},
+    every(ms,fn){const id=setInterval(()=>{if(!dead)fn();},ms);I.add(id);return id;},
+    raf(fn){let last=performance.now();const h={id:0};const loop=now=>{R.delete(h.id);if(dead)return;const dt=Math.min(64,now-last);last=now;if(fn(dt,now)!==false){h.id=requestAnimationFrame(loop);R.add(h.id);}};h.id=requestAnimationFrame(loop);R.add(h.id);},
+    anim(a){A.add(a);a.addEventListener('finish',()=>A.delete(a));return a;},
+    child(k){if(C[k])C[k].kill();const c=scope();C[k]=c;if(dead)c.kill();return c;},
+    kill(){dead=true;T.forEach(clearTimeout);I.forEach(clearInterval);R.forEach(cancelAnimationFrame);A.forEach(a=>{try{a.cancel()}catch(e){}});Object.values(C).forEach(c=>c.kill());}
+  };
+  return s;
+}
+function tween(s,ms,fn){return new Promise(res=>{const t0=performance.now();s.raf((dt,now)=>{const p=Math.min(1,(now-t0)/ms);fn(p);if(p>=1){res();return false;}});});}
+async function until(s,cond,step=100){while(!cond()){await s.wait(step);}}
+function bump(el){el.classList.remove('bump');void el.offsetWidth;el.classList.add('bump');}
+const esc=t=>t.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
+const fmtDur=sec=>{if(sec>=3600){const h=Math.floor(sec/3600),m=Math.round((sec%3600)/60);return `${h} h ${m} m`;}if(sec>=60){const m=Math.floor(sec/60),s=Math.round(sec%60);return `${m} m ${s} s`;}if(sec>=10)return `${Math.round(sec)} s`;return `${sec.toFixed(1)} s`;};
+
+/* ---------- logo ---------- */
+let uid=0;
+const CUBE=`<polygon class="f-top" points="110,18 164,45 110,72 56,45" fill="#FB923C"/><polygon class="f-l" points="56,45 110,72 110,126 56,99" fill="#EA580C"/><polygon class="f-r" points="164,45 110,72 110,126 164,99" fill="#F97316"/><polygon class="bolt" points="115,31 97,46 109,46 104,59 123,44 111,44" fill="#FFF7ED"/>`;
+function logoSVG(o={}){const g='lg'+(uid++);return `<svg class="iso-logo" viewBox="-6 -70 236 300" aria-hidden="true">
+<defs><radialGradient id="${g}"><stop offset="0" stop-color="#F97316" stop-opacity=".7"/><stop offset="1" stop-color="#F97316" stop-opacity="0"/></radialGradient>
+<radialGradient id="${g}m"><stop offset="0" stop-color="#FFC27A" stop-opacity=".6"/><stop offset="1" stop-color="#F97316" stop-opacity="0"/></radialGradient>
+<clipPath id="${g}c"><polygon points="110,18 164,45 164,99 110,126 56,99 56,45"/></clipPath>
+<linearGradient id="${g}s" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#FFF7ED" stop-opacity="0"/><stop offset=".5" stop-color="#FFF7ED" stop-opacity=".95"/><stop offset="1" stop-color="#FFF7ED" stop-opacity="0"/></linearGradient></defs>
+<ellipse class="lg-glow" cx="110" cy="120" rx="132" ry="84" fill="url(#${g})"/>
+<polygon points="110,68 206,116 110,164 14,116" fill="#1E293B"/>
+${o.mem?`<ellipse cx="110" cy="117" rx="74" ry="32" fill="url(#${g}m)"/>`:''}
+<polygon points="110,68 206,116 206,162 110,114" fill="#334155" opacity=".55"/>
+<polygon points="110,68 14,116 14,162 110,114" fill="#475569" opacity=".55"/>
+${o.ghost?`<g class="lg-ghost" style="transform:translate(80px,-104px) scale(.42);transform-origin:110px 72px">${CUBE}</g><text class="lg-ghost-l" x="190" y="8">standby</text>`:''}
+<g class="lg-drop"><g class="lg-hover"><g class="lg-core">${CUBE}</g>
+${o.scan?`<g clip-path="url(#${g}c)"><rect class="lg-scan" x="50" y="0" width="120" height="26" fill="url(#${g}s)"/></g>`:''}
+</g></g>
+<polygon points="14,116 110,164 110,218 14,170" fill="#334155"/>
+<polygon points="206,116 110,164 110,218 206,170" fill="#64748B"/>
+<polyline points="14,116 110,164 206,116" stroke="#94A3B8" stroke-width="2.5" stroke-linejoin="round" fill="none"/>
+<path d="M36,78 L36,54 M29,61 L36,53 L43,61" stroke="#F97316" stroke-width="4" stroke-linecap="round" stroke-linejoin="round" fill="none" opacity=".85"/>
+<path d="M184,54 L184,78 M177,71 L184,79 L191,71" stroke="#64748B" stroke-width="4" stroke-linecap="round" stroke-linejoin="round" fill="none" opacity=".85"/>
+</svg>`;}
+$('#orbitLogo').innerHTML=logoSVG();
+$('#markLogo').innerHTML=`<svg viewBox="10 14 200 208" aria-hidden="true"><polygon points="110,68 206,116 110,164 14,116" fill="#1E293B"/><polygon points="110,18 164,45 110,72 56,45" fill="#FB923C"/><polygon points="56,45 110,72 110,126 56,99" fill="#EA580C"/><polygon points="164,45 110,72 110,126 164,99" fill="#F97316"/><polygon points="14,116 110,164 110,218 14,170" fill="#334155"/><polygon points="206,116 110,164 110,218 206,170" fill="#64748B"/></svg>`;
+
+/* ---------- hero: the logo demonstrates the core mechanisms ---------- */
+(()=>{
+  const st=$('#titleLogo');st.innerHTML=logoSVG({ghost:true,scan:true,mem:true});
+  const svg=$('svg',st),core=$('.lg-core',st),ghost=$('.lg-ghost',st),ghostL=$('.lg-ghost-l',st),scan=$('.lg-scan',st),drop=$('.lg-drop',st),glow=$('.lg-glow',st),read=$('#mechRead');
+  const btns=$$('.mbtn'),undoB=$('.mbtn[data-m="undo"]'),undoS=$('small',undoB);let ver=0,busy=false;const journal=[];
+  const D=ms=>reduce?1:ms;
+  const sleep=ms=>new Promise(r=>setTimeout(r,reduce?0:ms));
+  const frames=(ms,fn)=>new Promise(res=>{const t0=performance.now();const f=now=>{const p=Math.min(1,Math.max(0,(now-t0)/ms));fn(p);if(p<1)requestAnimationFrame(f);else res();};requestAnimationFrame(f);});
+  const pt=(x,y)=>{const m=svg.getScreenCTM(),r=st.getBoundingClientRect();return [m.a*x+m.e-r.left,m.d*y+m.f-r.top];};
+  /* scene additions: CUDA graph cells on the cube, weight cells on the box, a wipe layer for refreshes */
+  const grid=(mx,cols,rows,w,h,g,u0,v0,cls)=>{let s=`<g transform="matrix(${mx})">`;for(let r=0;r<rows;r++)for(let c=0;c<cols;c++)s+=`<rect class="${cls}" x="${u0+c*(w+g)}" y="${v0+r*(h+g)}" width="${w}" height="${h}" rx="1.5"/>`;return s+'</g>';};
+  core.insertAdjacentHTML('beforeend',grid('1,.5,0,1,56,45',3,3,12,12,5,4,4,'hx-gc')+grid('1,-.5,0,1,110,72',3,3,12,12,5,4,4,'hx-gc'));
+  svg.insertAdjacentHTML('beforeend',`<g class="hx-weights">${grid('1,.5,0,1,14,116',5,3,14,9,4,5,5,'hx-wc')}${grid('1,-.5,0,1,110,164',5,3,14,9,4,5,5,'hx-wc')}</g>`);
+  scan.insertAdjacentHTML('beforebegin','<rect class="hx-wipe" x="50" y="10" width="120" height="122" fill="#FFF7ED"/>');
+  const wipe=$('.hx-wipe',st),gcs=$$('.hx-gc',st),wcs=$$('.hx-wc',st),memGlow=svg.querySelector('ellipse[cy="117"]');if(memGlow)memGlow.classList.add('hx-memglow');
+  /* HTML labels pinned to points of the drawing */
+  const anchors=new Map(),tmp=new Set();
+  const place=(e,x,y)=>{const [px,py]=pt(x,y);e.style.left=px+'px';e.style.top=py+'px';};
+  function mk(cls,html,x,y,temp){const e=document.createElement('div');e.className=cls;e.innerHTML=html;st.appendChild(e);anchors.set(e,[x,y]);place(e,x,y);if(temp)tmp.add(e);return e;}
+  const placeAll=()=>anchors.forEach((p,e)=>place(e,p[0],p[1]));
+  if(window.ResizeObserver)new ResizeObserver(placeAll).observe(st);addEventListener('resize',placeAll);
+  const clearTmp=()=>{tmp.forEach(e=>{anchors.delete(e);e.remove();});tmp.clear();};
+  /* a transient "v0 → v1" pill; the idle scene shows no version */
+  function setVer(from){if(from===ver)return;const e=mk('hx-tag hx-ver live',`v${from} → v${ver}`,110,-32,false);
+    e.animate([{opacity:0,transform:'translate(-50%,-20%)'},{opacity:1,transform:'translate(-50%,-50%)',offset:.12},{opacity:1,transform:'translate(-50%,-50%) scale(1.08)',offset:.25},{opacity:1,transform:'translate(-50%,-50%)',offset:.8},{opacity:0,transform:'translate(-50%,-80%)'}],{duration:D(3000),easing:'ease-out',fill:'forwards'}).finished.catch(()=>{}).then(()=>{anchors.delete(e);e.remove();});}
+  function result(html,cls=''){const e=mk('hx-tag hx-res '+cls,html,100,-63,true);e.animate([{opacity:0,transform:'translate(-50%,-10%)'},{opacity:1,transform:'translate(-50%,-50%)'}],{duration:D(500),easing:'ease-out'});return e;}
+  const sync=()=>{btns.forEach(b=>b.disabled=busy);undoS.textContent=ver?'replay the journal, ~0.05 s':'at base: ship an edit first';undoB.classList.toggle('base',!ver);};
+  const pulse=()=>glow.animate([{opacity:1,transform:'scale(1)'},{opacity:1,transform:'scale(1.3)'},{opacity:.6,transform:'scale(.95)'}],{duration:D(900),easing:'ease-out'});
+  /* refresh the cube: a bright flash, then a wipe that repaints it top to bottom (or bottom to top for undo) */
+  function refresh(up){const dur=D(1600),E='cubic-bezier(.45,0,.3,1)',a=up?-118:118;
+    const w=wipe.animate([{opacity:0,transform:'translateY(0)'},{opacity:.92,transform:'translateY(0)',offset:.25},{opacity:.92,transform:'translateY(0)',offset:.4,easing:E},{opacity:.85,transform:`translateY(${a}px)`}],{duration:dur});
+    scan.animate([{opacity:0,transform:`translateY(${up?104:0}px)`},{opacity:0,transform:`translateY(${up?104:0}px)`,offset:.4},{opacity:1,transform:`translateY(${up?104:0}px)`,offset:.42,easing:E},{opacity:.3,transform:`translateY(${up?0:104}px)`}],{duration:dur});
+    return w.finished.catch(()=>{});}
+  function chip(html,from,to,{out=false,dur=1100,hold=0}={}){const e=document.createElement('div');e.className='chipfly hx-chip';e.innerHTML=html;st.appendChild(e);
+    const [x0,y0]=from,[x1,y1]=to,mx=(x0+x1)/2,my=Math.min(y0,y1)-50,fr=[],T=dur+hold,h=hold/T,P=(t,s)=>{const u=1-t;return `translate(${u*u*x0+2*u*t*mx+t*t*x1}px,${u*u*y0+2*u*t*my+t*t*y1}px) translate(-50%,-50%) scale(${s})`;};
+    if(hold){fr.push({offset:0,transform:P(0,.9),opacity:0},{offset:Math.min(h,.12),transform:P(0,1),opacity:1});}
+    for(let i=0;i<=24;i++){const t=i/24,k=out?1-t:t;fr.push({offset:h+(1-h)*t,transform:P(t,1-.6*Math.max(0,(k-.72)/.28)),opacity:k>.94?0:1,easing:'linear'});}
+    const a=e.animate(fr,{duration:D(T),easing:'linear',fill:'forwards'});return a.finished.catch(()=>{}).then(()=>e.remove());}
+  async function edit(){
+    read.innerHTML='The agent ships a one-line edit to <b>sampler.py</b> into the running engine…';
+    await chip('<b>sampler.py</b><span class="d">− p = softmax(x)</span><span class="a">+ p = softmax(x/t)</span>',pt(30,0),pt(110,72),{hold:1300,dur:1200});
+    read.innerHTML='Only that function is swapped in place. The cube refreshes; the warm state below stays as it is…';
+    pulse();await refresh(false);
+    ver++;journal.push('sampler.py');setVer(ver-1);result('~70 ms<span>no restart</span>');
+    read.innerHTML=`<b>v${ver}</b> is live in <span class="t">~70 ms</span> (58–92 ms measured, slowed down here). The warm state never moved. No restart.`;}
+  async function graph(){
+    read.innerHTML='The agent edits <b>decode_attn.py</b>, code that runs inside captured CUDA graphs…';
+    await chip('<b>decode_attn.py</b><span class="d">− o = attn(q, k)</span><span class="a">+ o = attn(q, k, v)</span>',pt(30,0),pt(110,72),{hold:1300,dur:1200});
+    const hit=[2,5,8,9,12,15].map(i=>gcs[i]);hit.forEach(c=>c.classList.add('stale'));
+    read.innerHTML='Only the graphs on that path go stale (dark squares). The other graphs and the rest of the warm state stay as they are.';
+    await sleep(2000);read.innerHTML='Recapturing just those graphs…';
+    for(const c of hit){c.classList.remove('stale');c.classList.add('fresh');await sleep(420);}
+    pulse();await sleep(500);hit.forEach(c=>c.classList.remove('fresh'));
+    ver++;journal.push('decode_attn.py');setVer(ver-1);result('0.50–3.69 s<span>partial recapture</span>');
+    read.innerHTML=`<b>v${ver}</b> is live. Recapturing only the affected graphs takes <span class="t">0.50–3.69 s</span>, with no restart.`;}
+  async function check(){
+    const what=ver?journal[journal.length-1]:'base code';
+    read.innerHTML=`Running a targeted test and counting calls into <b>${what}</b> on every rank…`;
+    const p=mk('hx-check',`<div class="hx-ch">rsibox check</div><div class="hx-cg">${[0,1,2,3].map(i=>`<span>rank ${i}<b>0</b></span>`).join('')}</div><div class="hx-cf">0.0 s</div>`,-4,-12,true);
+    const nb=$$('b',p),f=$('.hx-cf',p),cnt=[0,0,0,0];let next=0;
+    await frames(D(2400),q=>{f.textContent=(q*2.4).toFixed(1)+' s';const step=Math.floor(q*14);while(next<step){next++;cnt.forEach((_,i)=>{if(Math.random()<.75||q>=1)cnt[i]++;});}
+      if(q>=1)cnt.forEach((c,i)=>{if(!c)cnt[i]=1;});nb.forEach((b,i)=>{b.textContent=cnt[i];b.classList.toggle('hit',cnt[i]>0);});});
+    f.textContent=ver?`proven in 2.4 s`:'base ran, 2.4 s';p.classList.add('ok');pulse();
+    result(ver?'proven<span>2.4 s</span>':'base ran<span>2.4 s</span>');
+    read.innerHTML=ver?`<b>v${ver} proven</b>: the targeted test ran in <span class="t">2.4 s</span> and every rank called the new <b>${what}</b> code.`:`Nothing edited yet, so the check proved the <b>base</b> code ran on every rank. Ship an edit to prove new code.`;}
+  async function crash(){
+    read.innerHTML='A bad edit crashes the engine process…';core.classList.add('crashed');
+    await drop.animate([{transform:'translateX(0)'},{transform:'translateX(-7px)'},{transform:'translateX(7px)'},{transform:'translateX(-5px)'},{transform:'translateX(4px)'},{transform:'translateX(0)'}],{duration:D(600)}).finished.catch(()=>{});
+    await sleep(500);
+    const [cx,cy]=pt(110,72);
+    if(!reduce)for(let i=0;i<18;i++){const sh=document.createElement('div');sh.className='shard';sh.style.left=cx+'px';sh.style.top=cy+'px';st.appendChild(sh);const a=Math.random()*Math.PI*2,d=50+Math.random()*90;
+      sh.animate([{transform:'translate(-50%,-50%)',opacity:1},{transform:`translate(${Math.cos(a)*d-5}px,${Math.sin(a)*d+50}px) rotate(${Math.random()*420}deg) scale(.5)`,opacity:0}],{duration:900+Math.random()*500,easing:'cubic-bezier(.2,.7,.3,1)',fill:'forwards'}).onfinish=()=>sh.remove();}
+    core.style.opacity=0;
+    read.innerHTML='The engine process is gone, but its warm state is still on the GPU.';
+    await sleep(1800);
+    read.innerHTML='Promoting the warm standby into its place…';
+    ghostL.style.opacity=0;ghost.classList.add('solid');
+    const mv=ghost.animate([{transform:'translate(80px,-104px) scale(.42)'},{transform:'translate(0px,0px) scale(1)'}],{duration:D(1500),easing:'cubic-bezier(.3,1.2,.4,1)',fill:'forwards'});
+    await mv.finished.catch(()=>{});pulse();
+    core.classList.remove('crashed');core.style.opacity=1;mv.cancel();ghost.classList.remove('solid');ghost.style.opacity=0;
+    const was=ver;ver=0;journal.length=0;setVer(was);result('0.10–1.86 s<span>standby promoted</span>');
+    read.innerHTML='The standby took over in <span class="t">0.10–1.86 s</span>, back at <b>base</b>. The warm state never left the GPU.';
+    await sleep(900);ghost.animate([{opacity:0},{opacity:1}],{duration:D(700),fill:'forwards'}).finished.then(()=>{ghost.style.opacity=1;});ghostL.style.opacity=1;}
+  async function undo(){
+    if(!ver){read.innerHTML='Already at <b>base</b>: the undo journal is empty. Ship an edit first, then undo it.';return;}
+    const n=journal.length,list=n>2?`${n} edits`:journal.slice().reverse().join(', ');
+    read.innerHTML=`Replaying the undo journal, newest entry first (${n} ${n>1?'entries':'entry'})…`;
+    await chip(`<b>undo journal</b><span class="d">− ${list}</span>`,pt(110,72),pt(30,0),{out:true,dur:1300});
+    gcs.forEach(c=>c.classList.remove('stale','fresh'));
+    pulse();await refresh(true);
+    const was=ver;ver=0;journal.length=0;setVer(was);result('~0.05 s<span>back to base</span>');
+    read.innerHTML='Undone in about <span class="t">0.05 s</span>. The exact <b>base</b> code is back, the warm state stayed put, and nothing restarted.';}
+  async function cold(){
+    const PH=[['kernel autotune',71],['weight load',128],['CUDA graph capture',170],['engine init',228]];
+    const NARR=['Cold restart, step 1 of 4: <b>kernel autotune</b> searches for fast kernels again.','Step 2 of 4: <b>weight load</b> refills GPU memory.','Step 3 of 4: <b>CUDA graph capture</b> records every graph again.','Step 4 of 4: <b>engine init</b> brings the engine back up.'];
+    read.innerHTML='For contrast, a cold restart: the engine stops and its warm GPU state is thrown away…';
+    svg.classList.add('hx-cold');core.classList.add('hx-empty');
+    wcs.forEach(c=>c.classList.add('off'));gcs.forEach(c=>c.classList.add('off'));if(memGlow)memGlow.style.opacity=0;
+    await sleep(1800);
+    const T=mk('hx-tag hx-timer','<b>0 s</b><span>kernel autotune</span><i>sped up 24×</i>',110,-40,true),Tb=$('b',T),Ts=$('span',T);
+    let cur=-1;
+    await frames(D(9500),p=>{const s=228*p;Tb.textContent=Math.round(s)+' s';
+      let k=PH.findIndex(x=>s<x[1]);if(k<0)k=3;
+      if(k!==cur){cur=k;Ts.textContent=PH[k][0];read.innerHTML=NARR[k];
+        if(k===0&&!reduce)scan.animate([{opacity:0,transform:'translateY(0)'},{opacity:.9,offset:.2},{opacity:.9,offset:.8},{opacity:0,transform:'translateY(104px)'}],{duration:1000,iterations:3,easing:'ease-in-out'});
+        if(k===3){core.classList.add('hx-slow');core.classList.remove('hx-empty');}}
+      const wl=Math.max(0,Math.min(1,(s-71)/57)),gl=Math.max(0,Math.min(1,(s-128)/42));
+      wcs.forEach((c,j)=>c.classList.toggle('off',j>=Math.round(wl*wcs.length)));gcs.forEach((c,j)=>c.classList.toggle('off',j>=Math.round(gl*gcs.length)));
+      if(memGlow)memGlow.style.opacity=wl;});
+    svg.classList.remove('hx-cold');if(memGlow)memGlow.style.opacity='';Ts.textContent='cold restart';pulse();
+    await sleep(1200);anchors.delete(T);tmp.delete(T);T.remove();result('228 s<span>cold restart, sped up 24×</span>','cold');
+    read.innerHTML=`Back after <span class="t cold">228 s</span> (shown 24× faster): autotune, weight load, graph capture and engine init all ran again. A hot reload skips every one.`;
+    await sleep(1600);core.classList.remove('hx-slow');}
+  const M={edit,graph,check,crash,undo,cold};
+  btns.forEach(b=>b.addEventListener('click',async()=>{if(busy)return;busy=true;sync();clearTmp();
+    try{await M[b.dataset.m]();await sleep(800);}catch(e){console.error(e);}finally{busy=false;sync();}}));
+  sync();
+})();
+
+/* ---------- thermal palette + heat field ---------- */
+const PAL=[[0,11,21,32],[.2,15,40,64],[.38,30,92,138],[.5,62,58,72],[.62,140,48,16],[.76,226,84,12],[.88,250,146,60],[1,255,212,160]];
+function pal(x){x=Math.max(0,Math.min(1,x));for(let i=1;i<PAL.length;i++){if(x<=PAL[i][0]){const a=PAL[i-1],b=PAL[i],t=(x-a[0])/(b[0]-a[0]);return [a[1]+(b[1]-a[1])*t,a[2]+(b[2]-a[2])*t,a[3]+(b[3]-a[3])*t].map(Math.round);}}return PAL[PAL.length-1].slice(1);}
+const tempColor=t=>`rgb(${pal(t<.3?.3+t*.3:.55+t*.4)})`;
+const hc=$('#heat'),hx=hc.getContext('2d');const HW=160,HH=90;hc.width=HW;hc.height=HH;
+const heat={temp:.72,target:.72};
+const blobs=Array.from({length:7},(_,i)=>({h:Math.random(),sx:.05+Math.random()*.09,sy:.04+Math.random()*.08,ph:Math.random()*6.28,r:.26+Math.random()*.26,a:.2+Math.random()*.14}));
+function drawHeat(t){
+  heat.temp+=(heat.target-heat.temp)*(reduce?1:.022);
+  const T=heat.temp;
+  hx.globalCompositeOperation='source-over';
+  hx.fillStyle=`rgb(${pal(.01+T*.05)})`;hx.fillRect(0,0,HW,HH);
+  hx.globalCompositeOperation='lighter';
+  for(const b of blobs){
+    const x=HW*(.5+.48*Math.sin(t*b.sx+b.ph)),y=HH*(.5+.46*Math.cos(t*b.sy+b.ph*1.7)),r=HW*b.r*(.85+.15*Math.sin(t*.4+b.ph));
+    const v=(.2+b.h*.2)*(1-T)+(.56+b.h*.36)*T;const c=pal(v);
+    const g=hx.createRadialGradient(x,y,0,x,y,r);g.addColorStop(0,`rgba(${c},${b.a})`);g.addColorStop(1,`rgba(${c},0)`);
+    hx.fillStyle=g;hx.beginPath();hx.arc(x,y,r,0,Math.PI*2);hx.fill();
+  }
+}
+let heatLast=0;
+function heatLoop(now){if(!document.hidden&&now-heatLast>40){heatLast=now;drawHeat(now/1000);}requestAnimationFrame(heatLoop);}
+if(reduce){drawHeat(3);}else requestAnimationFrame(heatLoop);
+
+/* ---------- sections: the one filling most of the screen is live ---------- */
+const slides=$$('.slide');
+const sims={};
+const navLinks=$$('#siteNav a');
+/* left table of contents: built from each section's data-title, grouped like the top nav */
+const tocEl=(()=>{
+  const groups=Object.fromEntries(navLinks.map(a=>[a.dataset.g,a.textContent]));
+  const nav=document.createElement('nav');nav.className='toc';nav.setAttribute('aria-label','On this page');
+  let h='<ol>',g=null;const size={};slides.forEach(s=>{const k=s.dataset.g||'';size[k]=(size[k]||0)+1;});
+  slides.forEach((s,i)=>{const sg=s.dataset.g||'';
+    if(sg!==g){if(g!==null)h+='</ol></li>';g=sg;const multi=size[sg]>1;
+      h+=`<li class="toc-g${multi?' multi':''}" data-g="${sg}">${multi?`<span class="toc-gl">${esc(groups[sg]||'')}</span>`:''}<ol>`;}
+    const t=i===0?'RSIBox':s.dataset.title;
+    h+=`<li><a href="#${s.id}" data-i="${i}" aria-label="${esc(t)}"><i aria-hidden="true"></i><span>${esc(t)}</span></a></li>`;});
+  nav.innerHTML=h+'</ol></li></ol>';document.body.appendChild(nav);return nav;})();
+const tocLinks=$$('a',tocEl);
+function tocSet(n){
+  tocLinks.forEach(a=>{const on=+a.dataset.i===n;a.classList.toggle('on',on);if(on)a.setAttribute('aria-current','true');else a.removeAttribute('aria-current');});
+  $$('.toc-g',tocEl).forEach(li=>li.classList.toggle('on',li.dataset.g===(slides[n].dataset.g||'')));
+}
+let cur=-1,S=scope(),userScrolled=false;
+slides.forEach(s=>$$('[data-a]',s).forEach((el,k)=>el.style.setProperty('--d',Math.min(k,8))));
+$$('.guide').forEach(g=>g.insertAdjacentHTML('afterbegin','<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true"><circle cx="12" cy="12" r="9"/><path d="M12 11v5M12 7.5h.01"/></svg>'));
+function activate(n){
+  if(n===cur)return;
+  const prev=slides[cur],next=slides[n];
+  S.kill();
+  if(prev){prev.classList.remove('is-active');try{sims[prev.id]?.leave?.();}catch(e){console.error(e);}}
+  cur=n;next.classList.add('is-active','seen');
+  heat.target=+next.dataset.temp;if(reduce)drawHeat(3);
+  navLinks.forEach(a=>a.classList.toggle('on',!!next.dataset.g&&a.dataset.g===next.dataset.g));
+  tocSet(n);
+  if(userScrolled){try{history.replaceState(null,'',n===0?location.pathname+location.search:'#'+next.id);}catch(e){}}
+  S=scope();
+  try{sims[next.id]?.enter?.(S);}catch(e){console.error(e);}
+}
+const vis=new Map();
+const io=new IntersectionObserver(es=>{
+  for(const e of es){const h=e.isIntersecting?e.intersectionRect.height:0;vis.set(e.target,h);if(h>innerHeight*.2||e.intersectionRatio>.5)e.target.classList.add('seen');}
+  let best=-1,bv=0;slides.forEach((s,i)=>{const v=vis.get(s)||0;if(v>bv){bv=v;best=i;}});
+  if(best>=0&&bv>innerHeight*.28)activate(best);
+},{threshold:Array.from({length:21},(_,i)=>i/20)});
+slides.forEach(s=>io.observe(s));
+addEventListener('scroll',()=>{userScrolled=true;},{passive:true,once:true});
+addEventListener('hashchange',()=>{userScrolled=true;});
+
+/* ================= slide 4: an agent ships edits into a warm engine ================= */
+$('#wgrid').innerHTML=Array.from({length:30},(_,k)=>`<i style="--k:${k}"></i>`).join('');
+$('#gcells').innerHTML=Array.from({length:16},()=>'<i></i>').join('');
+const MODS=[['Config','scheduler: max_num_seqs'],['Python','sampler()'],['Triton','fused_moe kernel'],['CUDA C++','activation kernels']];
+$('#mods').insertAdjacentHTML('beforeend',MODS.map(([k,n],i)=>`<div class="mod" data-i="${i}"><span class="kd">${k}</span><b>${n}</b><span class="v">v0</span></div>`).join(''));
+const IDEAS=[
+ {m:1,think:'Sampling shows up in the profile, and a zero temperature can produce NaNs. Clamp it before the softmax.',file:'vllm/v1/sample/sampler.py',kind:'Python function',
+  diff:[' def sample(self, logits, t):','-    probs = logits.div(t).softmax(-1)','+    probs = logits.div(t.clamp(min=1e-5)).softmax(-1)'],tier:'Python hot-swap',lat:'0.08 s'},
+ {m:2,think:'The MoE kernel leaves the GPU underfilled at this batch size. Try a larger tile.',file:'fused_moe/fused_moe.py',kind:'Triton kernel',
+  diff:[' @triton.jit',' def fused_moe_kernel(...):','-    BLOCK_SIZE_M: tl.constexpr = 64','+    BLOCK_SIZE_M: tl.constexpr = 128'],tier:'Triton hot-swap',lat:'0.09 s'},
+ {m:0,think:'Batches look small under this load. Let the scheduler admit more sequences at once.',file:'scheduler config',kind:'runtime flag',
+  diff:['-  max_num_seqs = 256','+  max_num_seqs = 512'],tier:'live runtime config',lat:'4 ms'},
+ {m:3,think:'The activation kernel is memory-bound. Unroll its inner loop further.',file:'csrc/activation_kernels.cu',kind:'CUDA C++',
+  diff:['  // silu_and_mul, inner loop','-  #pragma unroll 4','+  #pragma unroll 8'],tier:'.cu side-library reload',lat:'7.3 s',graphs:true},
+];
+const lineCls=l=>l[0]==='-'?'del':l[0]==='+'?'add':'';
+const SW={i:0,paused:false,shipped:0,run:null};
+const AP={think:$('#apThink'),file:$('#apFile'),kind:$('#apKind'),code:$('#apCode'),cmd:$('#apCmd'),res:$('#apRes'),idx:$('#apIdx'),dots:$$('#apDots i')};
+async function typeInto(s,el,text,ms=14){if(reduce){el.textContent=text;return;}for(let i=1;i<=text.length;i+=2){if(s.dead)return;el.textContent=text.slice(0,i);await s.wait(ms);}el.textContent=text;}
+function flyChip(s,fromEl,toEl,label){return new Promise(res=>{
+  const a=fromEl.getBoundingClientRect(),b=toEl.getBoundingClientRect();
+  const e=document.createElement('div');e.className='chipfly';e.style.position='fixed';e.textContent=label;document.body.appendChild(e);
+  const x0=a.left+a.width*.5,y0=a.top+a.height*.5,x1=b.left+b.width*.5,y1=b.top+b.height*.5,mx=(x0+x1)/2,my=Math.min(y0,y1)-90,fr=[];
+  for(let i=0;i<=24;i++){const t=i/24,u=1-t;fr.push({transform:`translate(${u*u*x0+2*u*t*mx+t*t*x1}px,${u*u*y0+2*u*t*my+t*t*y1}px) translate(-50%,-50%) scale(${1-.3*t})`,opacity:t>.95?0:1});}
+  const an=s.anim(e.animate(fr,{duration:reduce?1:1100,easing:'cubic-bezier(.45,0,.25,1)',fill:'forwards'}));
+  an.onfinish=()=>{e.remove();res();};an.oncancel=()=>e.remove();});}
+function warmEngine(){const eng=$('#engine');eng.classList.remove('cold','keep');$$('.blk',eng).forEach(b=>{b.style.setProperty('--lvl',100);b.classList.remove('filled');});
+  $('#engState').textContent='warm';$('#engState').className='pill good';$('#engTimeL').textContent='Time until the edit runs';
+  $('#engCount').innerHTML=`edits shipped ${SW.shipped}<br>restarts 0`;}
+async function idea(s,k){
+  const I=IDEAS[k],eng=$('#engine'),mods=$$('#mods .mod');
+  AP.idx.textContent=`idea ${k+1} of ${IDEAS.length}`;AP.dots.forEach((d,j)=>d.classList.toggle('on',j===k));
+  mods.forEach(m=>m.classList.remove('target','swapped'));eng.classList.remove('keep');
+  AP.res.innerHTML='';AP.cmd.textContent='';AP.code.innerHTML='';AP.file.textContent=I.file;AP.kind.textContent=I.kind;
+  AP.think.innerHTML='<span class="who">agent, thinking</span><span></span>';
+  await typeInto(s,$('span:last-child',AP.think),I.think);await s.wait(400);
+  $('.who',AP.think).textContent='agent, proposing a change';
+  for(const l of I.diff){AP.code.insertAdjacentHTML('beforeend',`<span class="${lineCls(l)}">${esc(l)}</span>`);await s.wait(reduce?0:260);}
+  mods[I.m].classList.add('target');await s.wait(900);
+  await typeInto(s,AP.cmd,`$ rsibox install   # ${I.file}`,10);await s.wait(400);
+  $('.who',AP.think).textContent='agent, shipping it';
+  await flyChip(s,$('#apDiff'),mods[I.m],I.file.split('/').pop());
+  mods[I.m].classList.remove('target');mods[I.m].classList.add('swapped');
+  const v=$('.v',mods[I.m]);v.textContent='v'+(+v.textContent.slice(1)+1);bump(v);
+  eng.classList.add('keep');
+  if(I.graphs){const c=$$('#gcells i');[2,3,9,10,13].forEach(j=>c[j].classList.add('re'));$('#graphKept').textContent='affected ones recaptured';}
+  SW.shipped++;$('#engCount').innerHTML=`edits shipped ${SW.shipped}<br>restarts 0`;
+  $('#engTime').textContent=I.lat;bump($('#engTime'));
+  AP.res.innerHTML=`<span class="pill good">live in ${I.lat}</span><span class="pill">${I.tier}</span><span class="pill">everything else kept</span>`;
+  $('.who',AP.think).textContent='agent, measuring the result';
+  await s.wait(reduce?400:3200);
+  if(I.graphs){$$('#gcells i').forEach(c=>c.classList.remove('re'));$('#graphKept').textContent='kept';}
+}
+async function swapLoop(s){while(!s.dead){await until(s,()=>!SW.paused,150);if(s.dead)return;await idea(s,SW.i);if(s.dead)return;SW.i=(SW.i+1)%IDEAS.length;}}
+function swapStart(){warmEngine();SW.run=S.child('swap');swapLoop(SW.run);}
+async function coldCompare(s){
+  const eng=$('#engine'),blks=$$('.blk',eng);
+  eng.classList.remove('keep');eng.classList.add('cold');$('#engState').textContent='cold, restarting';$('#engState').className='pill cold';
+  $('#engTimeL').textContent='Cold restart, for comparison (played 40× faster)';$('#engCount').innerHTML='without rsibox<br>restarts 1';
+  AP.res.innerHTML='<span class="pill cold">without rsibox, every idea waits for this</span>';
+  blks.forEach(b=>{b.style.setProperty('--lvl',0);b.classList.remove('filled');});
+  await tween(s,228/40*1000,p=>{$('#engTime').textContent=Math.round(228*p)+' s';const k=p*4;blks.forEach((b,i)=>{const lv=Math.max(0,Math.min(1,k-i));b.style.setProperty('--lvl',(lv*100).toFixed(1));b.classList.toggle('filled',lv>=1);});});
+  $('#engState').textContent='warm again, 228 s later';$('#engState').className='pill';
+  await s.wait(1800);if(s.dead)return;SW.paused=false;$('#apPause').textContent='Pause';$('#apPause').setAttribute('aria-pressed','false');swapStart();
+}
+$('#apPause').addEventListener('click',()=>{SW.paused=!SW.paused;$('#apPause').textContent=SW.paused?'Resume':'Pause';$('#apPause').setAttribute('aria-pressed',SW.paused);});
+$('#apNext').addEventListener('click',()=>{SW.i=(SW.i+1)%IDEAS.length;SW.paused=false;$('#apPause').textContent='Pause';$('#apPause').setAttribute('aria-pressed','false');swapStart();});
+$('#apCold').addEventListener('click',()=>{const s=S.child('swap');coldCompare(s);});
+sims['swap-what-changed']={enter(){SW.paused=false;$('#apPause').textContent='Pause';$('#apPause').setAttribute('aria-pressed','false');swapStart();}};
+
+/* ================= slide 5: route each edit to its tier ================= */
+const TIERS=[
+ {n:'Live runtime config',lo:3.7e-3,hi:5.15e-3,lat:'~4.3 ms',d:'Scheduler and batching flags such as max_num_seqs change inside the running process.'},
+ {n:'Python and Triton hot-swap',lo:.058,hi:.092,lat:'58–92 ms',d:'New function bodies and @triton.jit kernels swap on every GPU rank at once. Undo takes about 0.05 s.'},
+ {n:'Selective CUDA graph recapture',lo:.5,hi:3.69,lat:'0.50–3.69 s',d:'Only the CUDA graphs that run the edited code are recorded again. Every other graph is kept.'},
+ {n:'C++/CUDA side-library reload',lo:7.3,hi:19.2,lat:'7.3–19.2 s',d:'The edited .cu kernel compiles into a versioned side library, is rebound into torch.ops._C, and affected graphs are recaptured.'},
+ {n:'Pre-warmed fork server',lo:5,hi:20,lat:'~5–20 s',d:'A new worker forks from a process that already imported everything. Weights are handed over through CUDA IPC instead of reloading.'},
+ {n:'Dynamo GMS shadow or snapshot',lo:.1,hi:6.96,lat:'0.10–6.96 s',d:'A parked standby takes over, or a CRIU + cuda-checkpoint snapshot restores. Weights never leave GPU memory.'},
+];
+const EDITS=[
+ {n:'Raise max_num_seqs',t:0,why:'Only a runtime flag changed.',file:'scheduler config',diff:['-  max_num_seqs = 256','+  max_num_seqs = 512']},
+ {n:'Rewrite the sampler function',t:1,why:'A Python function body changed.',file:'vllm/v1/sample/sampler.py',diff:[' def sample(self, logits, t):','-    probs = logits.div(t).softmax(-1)','+    probs = logits.div(t.clamp(min=1e-5)).softmax(-1)']},
+ {n:'Tune a Triton kernel',t:1,why:'A @triton.jit kernel changed.',file:'fused_moe/fused_moe.py',diff:[' @triton.jit',' def fused_moe_kernel(...):','-    BLOCK_SIZE_M: tl.constexpr = 64','+    BLOCK_SIZE_M: tl.constexpr = 128']},
+ {n:'Edit code inside a CUDA graph',t:2,why:'The changed code runs inside captured CUDA graphs.',file:'layers/layernorm.py',diff:[' # replayed from captured CUDA graphs',' def forward(self, x, variance):','-    return x * torch.rsqrt(variance + self.eps)','+    return x * torch.rsqrt(variance + self.eps) * self.gain']},
+ {n:'Change a .cu kernel',t:3,why:'Compiled C++/CUDA code changed.',file:'csrc/activation_kernels.cu',diff:['  // silu_and_mul, inner loop','-  #pragma unroll 4','+  #pragma unroll 8']},
+ {n:'Change a launch flag',t:4,why:'Process startup has to run again.',file:'launch command',diff:['- vllm serve Qwen/Qwen3-8B --max-model-len 8192','+ vllm serve Qwen/Qwen3-8B --max-model-len 16384']},
+ {n:'The edit crashes a worker',t:5,why:'The worker died. A standby has to take over.',file:'vllm/v1/sample/sampler.py',diff:['-    idx = positions[:n]','+    idx = positions[:n + 1]   # off by one']},
+];
+const lpos=sec=>(Math.log10(sec)+3)/6*100;
+const codeBlock=(file,diff,note,tag='div')=>`<${tag} class="code-head"><span>${esc(file)}</span><span>${note}</span></${tag}><${tag==='div'?'pre':'span'} class="code">${diff.map(l=>`<span class="${lineCls(l)}">${esc(l)}</span>`).join('')}</${tag==='div'?'pre':'span'}>`;
+(function buildLadder(){
+  const L=$('#ladder');
+  let h='<div class="router" id="router"><small>rsibox router</small><b>What changed?</b><span class="rt-why" id="rtWhy">Pick an edit.</span></div><div class="rungs">';
+  TIERS.forEach((t,i)=>{
+    if(i===4)h+=`<div class="lad-div">Across a process boundary, weights stay on the GPU</div>`;
+    else if(i===0)h+=`<div class="lad-div" style="margin-top:0">Inside the running process</div>`;
+    const l=lpos(t.lo),w=Math.max(1.2,lpos(t.hi)-l);
+    h+=`<div class="rung" data-i="${i}"><span class="gut"></span><span><span class="nm">${t.n}</span><span class="lat">${t.lat}</span></span><div class="track"><i style="left:${l}%;width:${w}%"></i><span class="rl" style="left:${lpos(228)}%"></span></div></div>`;
+  });
+  const ticks=[[.001,'1 ms'],[.01,'10 ms'],[.1,'100 ms'],[1,'1 s'],[10,'10 s'],[100,'100 s']];
+  h+=`<div class="axis"><div></div><div></div><div class="ax">${ticks.map(([v,l])=>`<span style="left:${lpos(v)}%">${l}</span>`).join('')}<span class="rlab" style="left:${lpos(228)}%">cold restart 228 s</span></div></div></div><svg class="lad-lines" id="ladLines" aria-hidden="true"></svg>`;
+  L.innerHTML=h;
+  $('#edits').innerHTML=EDITS.map((e,i)=>`<button data-e="${i}" aria-pressed="false">${e.n}<span class="tip" aria-hidden="true">${codeBlock(e.file,e.diff,'illustrative diff','span')}</span></button>`).join('');
+  $$('#edits button').forEach(b=>b.addEventListener('click',()=>routeEdit(+b.dataset.e,S.child('route'))));
+  new ResizeObserver(ladLayout).observe(L);
+})();
+function ladLayout(){
+  const L=$('#ladder'),svg=$('#ladLines'),r=$('#router');const h=L.getBoundingClientRect();if(!h.width)return;
+  svg.setAttribute('width',h.width);svg.setAttribute('height',h.height);svg.setAttribute('viewBox',`0 0 ${h.width} ${h.height}`);
+  const rr=r.getBoundingClientRect(),x0=rr.right-h.left,y0=rr.top-h.top+rr.height/2;
+  const on=$('.lad-path.on',svg)?.dataset.i;
+  svg.innerHTML=$$('#ladder .rung .gut').map((g,i)=>{const b=g.getBoundingClientRect(),x1=b.left-h.left+b.width/2,y1=b.top-h.top+b.height/2,mx=(x0+x1)/2;
+    return `<path class="lad-path${String(i)===on?' on':''}" data-i="${i}" d="M${x0.toFixed(1)},${y0.toFixed(1)} C${mx.toFixed(1)},${y0.toFixed(1)} ${mx.toFixed(1)},${y1.toFixed(1)} ${x1.toFixed(1)},${y1.toFixed(1)}"/>`;}).join('');
+}
+function along(s,box,path,cls,dur){return new Promise(res=>{
+  const len=path.getTotalLength(),fr=[];for(let i=0;i<=28;i++){const q=path.getPointAtLength(len*i/28);fr.push({transform:`translate(${q.x}px,${q.y}px)`});}
+  const el=document.createElement('div');el.className=cls;el.innerHTML='<i></i>';box.appendChild(el);
+  const a=s.anim(el.animate(fr,{duration:reduce?1:dur,easing:'cubic-bezier(.45,0,.2,1)',fill:'forwards'}));
+  a.onfinish=()=>{el.remove();res();};a.oncancel=()=>el.remove();});}
+async function routeEdit(e,s){
+  const E=EDITS[e],L=$('#ladder'),rt=$('#router'),why=$('#rtWhy'),rungs=$$('#ladder .rung');
+  $$('#edits button').forEach((b,i)=>b.setAttribute('aria-pressed',i===e));
+  rungs.forEach(r=>r.classList.remove('landed'));$$('.lad-path',L).forEach(p=>p.classList.remove('on'));L.classList.remove('routing');$$('.rpk',L).forEach(x=>x.remove());
+  $('#readout').innerHTML=`<b>${E.n}</b><span class="rl-t">…</span><p>The router is reading the diff.</p><div class="rd-diff">${codeBlock(E.file,E.diff,'what changed')}</div>`;
+  rt.classList.add('busy');why.textContent='Reading the diff…';
+  await s.wait(reduce?0:800);why.textContent=E.why;await s.wait(reduce?0:600);
+  const p=$(`.lad-path[data-i="${E.t}"]`,L);L.classList.add('routing');
+  if(p){p.classList.add('on');if(getComputedStyle($('#ladLines')).display!=='none')await along(s,L,p,'rpk',1000);}
+  if(s.dead)return;
+  rt.classList.remove('busy');rungs[E.t].classList.add('landed');
+  const t=TIERS[E.t];
+  $('#readout').innerHTML=`<b>${t.n}</b><span class="rl-t">${t.lat}</span><p>${E.why} ${t.d}</p><div class="rd-diff">${codeBlock(E.file,E.diff,'what changed, illustrative')}</div>`;
+}
+sims['tiers']={enter(s){ladLayout();s.wait(900).then(()=>{ladLayout();routeEdit(1,s.child('route'));});}};
+
+/* ================= slide 6: lifecycle ================= */
+const LC=(()=>{
+  const stage=$('#lcStage'),svg=$('#lcLines'),narr=$('#lcNarr'),log=$('#lcLog'),cmd=$('#lcCmd'),res=$('#lcRes');
+  const rail=$$('#lcRail li');
+  const N={agent:$('#lcAgent'),box:$('#lcBox'),coord:$('#lcCoord')};
+  const STEP=1800,HOLD=1800,PK=1150;
+  const ranks=[0,1,2,3].map(i=>{const el=document.createElement('div');el.className='lc-rank';
+    el.innerHTML=`<div class="rk-top"><b>GPU ${i}</b></div><div class="rk-badge">sampler v0</div><div class="rk-meta"><span>calls <b class="rk-w">0</b></span><span>undo log <b class="rk-j">0</b></span></div><div class="rk-vote"></div>`;
+    $('#lcRanks').appendChild(el);
+    return {el,badge:$('.rk-badge',el),w:$('.rk-w',el),j:$('.rk-j',el),vote:$('.rk-vote',el),v:0,calls:0};});
+  const paths={};
+  function anchor(el,side){const r=el.getBoundingClientRect(),h=stage.getBoundingClientRect();const x=r.left-h.left,y=r.top-h.top;
+    if(side==='r')return [x+r.width,y+r.height/2];if(side==='l')return [x,y+r.height/2];if(side==='b')return [x+r.width/2,y+r.height];return [x+r.width/2,y];}
+  function layout(){
+    const h=stage.getBoundingClientRect();if(!h.width)return;
+    svg.setAttribute('width',h.width);svg.setAttribute('height',h.height);svg.setAttribute('viewBox',`0 0 ${h.width} ${h.height}`);svg.innerHTML='';
+    const mk=(k,a,b,curve)=>{const my=(a[1]+b[1])/2;const d=curve?`M${a[0]},${a[1]} C${a[0]},${my} ${b[0]},${my} ${b[0]},${b[1]}`:`M${a[0]},${a[1]} L${b[0]},${b[1]}`;
+      const p=document.createElementNS(SVGNS,'path');p.setAttribute('d',d);p.setAttribute('class','lc-path');svg.appendChild(p);paths[k]=p;};
+    const ra=N.agent.getBoundingClientRect(),rb=N.box.getBoundingClientRect();
+    if(rb.left>=ra.right-2)mk('agent-box',anchor(N.agent,'r'),anchor(N.box,'l'));else mk('agent-box',anchor(N.agent,'b'),anchor(N.box,'t'),true);
+    mk('box-coord',anchor(N.box,'b'),anchor(N.coord,'t'),true);
+    ranks.forEach((r,i)=>mk('coord-r'+i,anchor(N.coord,'b'),anchor(r.el,'t'),true));
+  }
+  new ResizeObserver(()=>layout()).observe(stage);
+  function packet(s,key,label,o={}){return new Promise(res=>{
+    const p=paths[key];if(!p||s.dead){if(!s.dead)res();return;}
+    const L=p.getTotalLength(),fr=[];for(let i=0;i<=24;i++){const q=p.getPointAtLength(L*(o.rev?1-i/24:i/24));fr.push({transform:`translate(${q.x}px,${q.y}px)`});}
+    const el=document.createElement('div');el.className='pk '+(o.cls||'');el.innerHTML=`<i></i><span>${label}</span>`;stage.appendChild(el);p.classList.add('live');
+    const a=s.anim(el.animate(fr,{duration:reduce?1:(o.dur||PK),easing:'cubic-bezier(.45,0,.2,1)',fill:'forwards'}));
+    a.onfinish=()=>{el.remove();p.classList.remove('live');res();};a.oncancel=()=>{el.remove();p.classList.remove('live');};
+  });}
+  /* one label for the four rank messages keeps the picture calm */
+  const toRanks=(s,label,o={})=>Promise.all(ranks.map((r,i)=>packet(s,'coord-r'+i,i===0?label:'',o)));
+  const fromRanks=(s,labels,o={})=>Promise.all(ranks.map((r,i)=>packet(s,'coord-r'+i,i===0?labels[i]:'',{...o,rev:true,cls:typeof o.cls==='function'?o.cls(i):(o.cls||'')})));
+  const clk={p:0,step:1040,run:true,want:false,waiters:[]};
+  function tick(dt){
+    if(clk.run){clk.p+=dt/STEP;
+      if(clk.p>=1){
+        if(clk.want){clk.p=1;clk.run=false;clk.want=false;ranks.forEach(r=>r.el.classList.add('gap'));const w=clk.waiters;clk.waiters=[];w.forEach(f=>f());}
+        else{clk.p-=1;clk.step++;ranks.forEach(r=>{if(r.v>0){r.calls++;r.w.textContent=r.calls;bump(r.w);}});}
+      }}
+  }
+  const stepGap=()=>{clk.want=true;return new Promise(r=>clk.waiters.push(r));};
+  const resume=()=>{clk.p=0;clk.step++;clk.run=true;ranks.forEach(r=>r.el.classList.remove('gap'));};
+  let ph=0,busy=false,committed=false,aborted=false,fault=false,recovered=false,R=null;
+  const say=t=>{narr.textContent=t;};
+  const logLine=(t,c='')=>{const li=document.createElement('li');li.className=c;li.textContent=t;log.appendChild(li);while(log.children.length>3)log.firstChild.remove();};
+  const vote=(r,t,c)=>{r.vote.textContent=t;r.vote.className='rk-vote show '+c;};
+  const setRes=(t,c)=>{res.innerHTML=t?`<span class="pill ${c}">${t}</span>`:'';};
+  const B={play:$('#lcPlay'),step:$('#lcStep'),undo:$('#lcUndo'),fault:$('#lcFault'),crash:$('#lcCrash'),reset:$('#lcReset')};
+  function btns(){const done=ph>=4||aborted;B.play.disabled=busy||done;B.step.disabled=busy||done;B.undo.disabled=busy||!committed||ph<4;B.fault.disabled=busy||ph>0;B.crash.disabled=busy||committed||recovered;}
+  const phases=[
+    async s=>{say('Stage. The agent sends its edited file. rsibox reads it and checks it against the live code while all four GPUs keep stepping. Nothing in the engine has changed yet.');
+      cmd.textContent='$ rsibox install --file vllm.v1.worker.gpu.sample.sampler=/tmp/sampler.py';setRes('');
+      await packet(s,'agent-box','install');await packet(s,'box-coord','edit');
+      for(const t of ['parse edited module ✓','live code matches base ✓','no unsupported change ✓']){await s.wait(reduce?0:650);logLine(t);}},
+    async s=>{say('Prepare. The coordinator asks every GPU rank whether it can apply the edit. Each one answers yes or no.');
+      await toRanks(s,'prepare');await s.wait(reduce?0:500);
+      const votes=ranks.map((r,i)=>fault&&i===2?'no':'yes');ranks.forEach((r,i)=>vote(r,votes[i],votes[i]));
+      await s.wait(reduce?0:700);
+      await fromRanks(s,votes,{cls:i=>votes[i]==='no'?'bad':''});
+      const y=votes.filter(v=>v==='yes').length;logLine(`${y} of 4 ranks ready`,y<4?'bad':'');},
+    async s=>{
+      if(fault){
+        say('Abort. GPU 2 can’t apply the edit, so no rank does. Every GPU keeps running the original code, and the agent gets a clear refusal.');
+        await toRanks(s,'abort',{cls:'bad'});
+        ranks.forEach(r=>{r.el.classList.remove('flash-bad');void r.el.offsetWidth;r.el.classList.add('flash-bad');vote(r,'kept v0','');});
+        logLine('aborted on every rank','bad');
+        await packet(s,'box-coord','refused',{rev:true,cls:'bad'});await packet(s,'agent-box','refused',{rev:true,cls:'bad'});
+        setRes('refused, nothing changed','bad');aborted=true;rail[2].classList.add('bad');return 'abort';
+      }
+      say('Commit. The coordinator waits for the current step to finish. In the short gap before the next step, all four ranks swap at the same moment.');
+      ranks.forEach(r=>r.vote.className='rk-vote');
+      logLine('waiting for the step gap…');await stepGap();logLine('step gap: commit');
+      await toRanks(s,'commit',{dur:800});
+      ranks.forEach(r=>{r.v=1;r.badge.textContent='sampler v1';r.badge.classList.add('new');r.j.textContent=3;bump(r.j);r.el.classList.remove('flash');void r.el.offsetWidth;r.el.classList.add('flash');});
+      committed=true;await s.wait(reduce?0:1400);resume();},
+    async s=>{say('Prove it ran. As the engine keeps stepping, each rank counts calls to the new code. A count of zero would fail the check, so a swap that never runs can’t pass as a result.');
+      await until(s,()=>ranks.every(r=>r.calls>=2));logLine('calls > 0 on every rank ✓');
+      cmd.textContent='$ rsibox check';await s.wait(reduce?0:600);
+      await packet(s,'agent-box','check');await packet(s,'box-coord','check');
+      await fromRanks(s,ranks.map(r=>'calls '+r.calls));
+      logLine('output matches ✓');
+      await packet(s,'box-coord','proven',{rev:true});await packet(s,'agent-box','proven',{rev:true});
+      setRes('proven: True','good');}
+  ];
+  async function undo(s){
+    say('Undo. Each rank replays its journal from newest to oldest and restores the exact original code. About 0.05 s, with no restart.');
+    rail.forEach(li=>li.classList.remove('on'));rail[4].classList.add('on');
+    cmd.textContent='$ rsibox uninstall';setRes('');
+    await packet(s,'agent-box','uninstall');await packet(s,'box-coord','uninstall');
+    await toRanks(s,'undo',{dur:800});
+    for(let k=2;k>=0;k--){ranks.forEach(r=>{r.j.textContent=k;bump(r.j);});await s.wait(reduce?0:320);}
+    ranks.forEach(r=>{r.v=0;r.calls=0;r.w.textContent=0;r.badge.textContent='sampler v0';r.badge.classList.remove('new');});
+    logLine('base identity verified ✓');setRes('status: base','');
+    rail[4].classList.remove('on');rail[4].classList.add('done');committed=false;
+  }
+  /* numbers: docs/mechanisms.md, GMS standby shadow promotion 0.10-1.86 s; a poisoned sandbox blocks edits (conformance c8) */
+  async function crash(s){
+    const r=ranks[2];
+    rail.forEach(li=>li.classList.remove('on'));rail[5].classList.add('on');setRes('');
+    say('Crash. The worker on GPU 2 dies in the middle of a step. RSIBox notices at once, marks the sandbox poisoned and refuses every edit, so no result can come from a broken engine.');
+    r.el.classList.add('dead');r.badge.textContent='worker lost';r.badge.classList.remove('new');
+    r.el.classList.remove('flash-bad');void r.el.offsetWidth;r.el.classList.add('flash-bad');
+    await packet(s,'coord-r2','lost',{rev:true,cls:'bad'});
+    logLine('GPU 2 worker lost','bad');logLine('sandbox poisoned: edits blocked','bad');
+    await packet(s,'box-coord','poisoned',{rev:true,cls:'bad'});await packet(s,'agent-box','poisoned',{rev:true,cls:'bad'});
+    setRes('poisoned: edits blocked','bad');
+    await s.wait(reduce?0:1600);
+    say('Recover. A standby worker was parked next to GPU 2 with the weights already in GPU memory. RSIBox promotes it in 0.10–1.86 s, with no weight reload, then unblocks edits.');
+    await packet(s,'coord-r2','promote',{dur:900});
+    r.el.classList.remove('dead');r.badge.textContent='sampler v0';r.calls=0;r.w.textContent=0;
+    r.el.classList.remove('flash');void r.el.offsetWidth;r.el.classList.add('flash');
+    logLine('standby promoted ✓');logLine('edits unblocked ✓');
+    await packet(s,'box-coord','ready',{rev:true});await packet(s,'agent-box','ready',{rev:true});
+    setRes('recovered, weights kept','good');
+    rail[5].classList.remove('on');rail[5].classList.add('done');recovered=true;
+  }
+  async function runPhase(i){
+    busy=true;btns();rail.forEach((li,k)=>li.classList.toggle('on',k===i));
+    const out=await phases[i](R);
+    rail[i].classList.remove('on');if(out!=='abort')rail[i].classList.add('done');
+    ph=i+1;busy=false;btns();return out;
+  }
+  async function play(){const s=R;for(let i=ph;i<4;i++){if(aborted||s.dead)break;const o=await runPhase(i);if(o==='abort')break;if(i<3){busy=true;btns();await s.wait(reduce?0:HOLD);busy=false;btns();}}}
+  function reset(slideScope){
+    R=slideScope.child('lc');ph=0;busy=false;committed=false;aborted=false;recovered=false;
+    log.innerHTML='';cmd.textContent='$ waiting';setRes('');say('Press play to send an edit to a 4-GPU engine.');
+    rail.forEach(li=>li.className='');
+    ranks.forEach(r=>{r.v=0;r.calls=0;r.w.textContent=0;r.j.textContent=0;r.badge.textContent='sampler v0';r.badge.classList.remove('new');r.vote.className='rk-vote';r.el.classList.remove('gap','flash','flash-bad','dead');});
+    $$('.pk',stage).forEach(e=>e.remove());Object.values(paths).forEach(p=>p.classList.remove('live'));
+    clk.run=true;clk.want=false;clk.waiters=[];
+    btns();
+  }
+  /* jump to the state right before step i, so any step can be replayed on its own */
+  function snap(i){
+    if(i>=3&&fault){fault=false;B.fault.setAttribute('aria-pressed','false');}
+    if(i>=1){cmd.textContent='$ rsibox install --file vllm.v1.worker.gpu.sample.sampler=/tmp/sampler.py';['parse edited module ✓','live code matches base ✓','no unsupported change ✓'].forEach(t=>logLine(t));}
+    if(i>=2){const v=ranks.map((r,k)=>fault&&k===2?'no':'yes');ranks.forEach((r,k)=>vote(r,v[k],v[k]));const y=v.filter(x=>x==='yes').length;logLine(`${y} of 4 ranks ready`,y<4?'bad':'');}
+    if(i>=3){ranks.forEach(r=>{r.vote.className='rk-vote';r.v=1;r.badge.textContent='sampler v1';r.badge.classList.add('new');r.j.textContent=3;});committed=true;logLine('step gap: commit');}
+    if(i>=4){ranks.forEach(r=>{r.calls=2;r.w.textContent=2;});cmd.textContent='$ rsibox check';logLine('calls > 0 on every rank ✓');logLine('output matches ✓');setRes('proven: True','good');}
+    rail.forEach((li,k)=>li.classList.toggle('done',k<i));ph=Math.min(i,4);
+  }
+  async function jump(i){
+    reset(S);snap(i);
+    if(i===5){reset(S);ph=4;busy=true;btns();await crash(R);busy=false;btns();}
+    else if(i===4){busy=true;btns();await undo(R);busy=false;btns();}else{btns();await runPhase(i);}
+  }
+  rail.forEach((li,i)=>{li.addEventListener('click',()=>jump(i));li.addEventListener('keydown',e=>{if(e.key==='Enter'||e.key===' '){e.preventDefault();jump(i);}});});
+  B.play.addEventListener('click',()=>play());
+  B.step.addEventListener('click',()=>{if(ph<4&&!aborted)runPhase(ph);});
+  B.undo.addEventListener('click',async()=>{busy=true;btns();await undo(R);busy=false;btns();});
+  B.fault.addEventListener('click',()=>{fault=!fault;B.fault.setAttribute('aria-pressed',fault);});
+  B.crash.addEventListener('click',async()=>{busy=true;btns();await crash(R);busy=false;btns();});
+  B.reset.addEventListener('click',()=>reset(S));
+  return {enter(s){reset(s);layout();s.wait(1150).then(layout);s.raf(tick);s.wait(1700).then(()=>{if(ph===0&&!busy)play();});}};
+})();
+sims['lifecycle']=LC;
+
+/* ================= slide 10: architecture as restart boundaries ================= */
+/* numbers: README tier table and docs/mechanisms.md (GMS + CRIU restore 3.62–5.16 s across 1.5–65.5 GB tiers) */
+const BND={
+  code:{t:'58–92 ms',cold:['code'],own:['1','2'],title:'Restart only the edited code',
+    what:'A function body or an <span class="k">@triton.jit</span> kernel changed. The hot-reload kernel swaps the new code on every GPU rank in a step gap and writes down how to undo it (about 0.05 s).',
+    re:'the edited functions and kernels',keep:'the process, weights, KV cache, CUDA graphs and native kernels'},
+  graphs:{t:'0.50–3.69 s',cold:['graphs','code'],own:['1','4','2'],title:'Recapture only the affected CUDA graphs',
+    what:'The edit sits on a path the engine captured in a CUDA graph. The engine adapter recaptures only the graphs that touch it, then the kernel commits the swap.',
+    re:'the affected CUDA graphs and the edited code',keep:'the process, weights, KV cache and native kernels'},
+  native:{t:'7.3–19.2 s',cold:['native','graphs','code'],own:['1','4'],title:'Rebuild one native library',
+    what:'A C++/CUDA kernel changed. The adapter compiles the edited <span class="k">.cu</span> side library, rebinds it in the running process and recaptures the graphs that call it.',
+    re:'the native library and the graphs that call it',keep:'the process, weights and KV cache'},
+  worker:{t:'0.10–1.86 s',cold:['worker','kv','native','graphs','code'],own:['1','3'],title:'Swap in a warm standby worker',
+    what:'A worker crashed, hit a sticky CUDA fault, or the edit changed launch flags or start-up code. Warm recovery promotes a parked Dynamo GMS standby shadow that already holds the weights.',
+    re:'the worker process and its KV cache, replaced by the standby',keep:'the weights, resident in GPU memory'},
+  engine:{t:'3.6–5.2 s',cold:['engine','worker','kv','native','graphs','code'],own:['1','3'],title:'Restore the whole engine from a snapshot',
+    what:'The last resort, when no standby fits. The engine was frozen once with CRIU and <span class="k">cuda-checkpoint</span> while its weights stayed in Dynamo GPU Memory Service. Restore brings back the process and its CUDA graphs without reloading weights or recapturing graphs, and stays flat from 1.5 to 65.5 GB models. A cold restart would take 228 s.',
+    re:'the process, its CUDA graphs and kernels, restored from the snapshot',keep:'the weights, resident in GPU memory'}
+};
+const ORDER=['code','graphs','native','worker','engine'];
+/* edit card on the "can be mitigated" slide: show the edit each engine's ladder actually measured */
+document.addEventListener('fig-engine',e=>{
+  const c=$('#editCard');if(!c)return;const d=e.detail,s=d.setup||'';
+  const cut=[s.indexOf(';'),s.indexOf(' (')].filter(i=>i>0);const at=cut.length?Math.min(...cut):-1;
+  const what=at>0?s.slice(0,at):s,setup=at>0?s.slice(at).replace(/^;\s*|^\s*\(/,'').replace(/\);/,';').replace(/\)$/,'').trim():'';
+  $('[data-eng]',c).textContent=d.label;$('[data-what]',c).textContent=what;
+  const p=$('[data-setup]',c);p.textContent=setup?setup.charAt(0).toUpperCase()+setup.slice(1):'';p.hidden=!setup;
+  const sp=d.first/d.last;
+  const f=v=>v>=50?`${Math.round(v)} s`:v>=10?`${v.toFixed(1)} s`:`${v.toFixed(1)} s`;
+  $('[data-r]',c).textContent=f(d.first);
+  $('[data-l]',c).innerHTML=`${f(d.last)}<small>${sp>=10?Math.round(sp):sp.toFixed(1)}× faster</small>`;
+});
+const archSec=$('#architecture'),bndCard=$('#bndCard');
+ORDER.forEach(k=>{const t=$(`.nb[data-b="${k}"] > .nb-t [data-t]`,archSec);if(t)t.textContent=BND[k].t;});
+let bndCur=null;
+function pickBnd(k){
+  bndCur=k;const b=BND[k];
+  $$('#bndList li').forEach(li=>li.classList.toggle('on',li.dataset.k===k));
+  $$('.nest-node [data-b]',archSec).forEach(el=>{const c=b.cold.includes(el.dataset.b);el.classList.toggle('cold',c);el.classList.toggle('sel',el.dataset.b===k);});
+  $$('[data-o]',archSec).forEach(el=>el.classList.toggle('on',b.own.includes(el.dataset.o)));
+  bndCard.innerHTML=`<h3>${b.title} <span style="color:var(--frost);font:600 14px var(--f-mono)">${b.t}</span></h3><p>${b.what}</p>
+    <dl><dt>Rebuilt</dt><dd class="cold">${b.re}</dd><dt>Kept warm</dt><dd class="warm">${b.keep}</dd></dl>`;
+}
+let bndAuto=null;
+$$('#bndList li').forEach(li=>{const go=()=>{if(bndAuto)bndAuto.kill();bndAuto=null;pickBnd(li.dataset.k);};
+  li.addEventListener('click',go);li.addEventListener('keydown',e=>{if(e.key==='Enter'||e.key===' '){e.preventDefault();go();}});});
+pickBnd('code');
+sims['architecture']={enter(s){
+  bndAuto=s.child('bnd');const a=bndAuto;pickBnd('code');if(reduce)return;
+  (async()=>{for(const k of ORDER.slice(1)){await a.wait(3200);pickBnd(k);}await a.wait(3600);pickBnd('code');})();
+}};
+
+/* ================= slide 11: pool ================= */
+const POOL=(()=>{  /* the agent-teams demo inside the roadmap pop-up */
+  const qEl=$('#poolQ'),sEl=$('#poolSlots');let slots=[],queue=[],seq=0,done=0,faults=0;
+  const NAMES='ABCDEFGHJKLMNPQRSTUVWXYZ';
+  const upd=()=>{$('#poolDone').textContent=done;$('#poolFaults').textContent=faults;};
+  function init(){
+    sEl.innerHTML='';$$('.agent',qEl).forEach(e=>e.remove());queue=[];seq=0;done=0;faults=0;upd();
+    slots=[0,1,2,3].map(i=>{const el=document.createElement('div');el.className='slot';el.innerHTML=`<div class="sl-head"><b>GPU ${i}</b><span class="sl-st">warm, idle</span></div><div class="sl-body"></div><div class="sl-bar"><i></i></div>`;sEl.appendChild(el);
+      return {el,st:$('.sl-st',el),body:$('.sl-body',el),bar:$('.sl-bar i',el),a:null,prog:0,dur:0,state:'idle'};});
+  }
+  function spawn(){const id=seq++;const pri=[1,1,2,3][Math.floor(Math.random()*4)];const el=document.createElement('div');el.className='agent';el.title=`Agent ${NAMES[id%NAMES.length]}, priority ${pri}`;
+    el.innerHTML=`<span class="ag-l">${NAMES[id%NAMES.length]}</span><span class="ag-p">p${pri}</span>`;const a={id,name:NAMES[id%NAMES.length],pri,age:0,el};queue.push(a);qEl.appendChild(el);
+    el.animate([{opacity:0,transform:'translateY(-14px) scale(.6)'},{opacity:1,transform:'none'}],{duration:reduce?1:420,easing:'cubic-bezier(.2,.9,.3,1.3)'});}
+  const score=a=>a.pri+a.age*.5;
+  function tick(dt){
+    queue.forEach(a=>{a.age+=dt/1000;a.el.style.setProperty('--age',Math.min(1,a.age/7).toFixed(3));});
+    slots.forEach(sl=>{if(sl.state==='run'){sl.prog+=dt;sl.bar.style.width=Math.min(100,sl.prog/sl.dur*100)+'%';if(sl.prog>=sl.dur)finish(sl);}});
+  }
+  function schedule(){
+    queue.sort((x,y)=>score(y)-score(x));queue.forEach(a=>qEl.appendChild(a.el));
+    const sl=slots.find(x=>x.state==='idle');if(!sl||!queue.length)return;
+    const a=queue.shift();const r0=a.el.getBoundingClientRect();sl.body.appendChild(a.el);const r1=a.el.getBoundingClientRect();
+    a.el.animate([{transform:`translate(${r0.left-r1.left}px,${r0.top-r1.top}px)`},{transform:'none'}],{duration:reduce?1:520,easing:'cubic-bezier(.2,.8,.2,1)'});
+    a.el.classList.add('running');a.el.style.removeProperty('--age');sl.a=a;sl.state='run';sl.prog=0;sl.dur=2400+Math.random()*2600;sl.st.textContent=`agent ${a.name} editing live`;sl.el.classList.add('busy');
+  }
+  function finish(sl){done++;upd();const el=sl.a.el;el.animate([{opacity:1},{opacity:0,transform:'translateY(-12px) scale(.7)'}],{duration:340,fill:'forwards'}).onfinish=()=>el.remove();
+    sl.a=null;sl.state='idle';sl.bar.style.width='0';sl.st.textContent='warm, idle';sl.el.classList.remove('busy');}
+  async function rogue(s){
+    const run=slots.filter(x=>x.state==='run');if(!run.length)return;const sl=run[Math.floor(Math.random()*run.length)];
+    sl.state='poisoned';faults++;upd();sl.el.classList.add('poisoned');sl.a.el.classList.add('rogue');sl.st.textContent=`poisoned by ${sl.a.name}, isolated`;
+    await s.wait(1900);sl.a.el.remove();sl.a=null;sl.el.classList.remove('poisoned','busy');sl.el.classList.add('respawn');sl.st.textContent='respawning at base';sl.bar.style.width='0';
+    await s.wait(1100);sl.el.classList.remove('respawn');sl.state='idle';sl.st.textContent='warm, idle';
+  }
+  $('#poolAdd').addEventListener('click',()=>spawn());
+  $('#poolRogue').addEventListener('click',()=>rogue(POOL.scope()));
+  return {scope:null,enter(s){init();for(let i=0;i<5;i++)spawn();s.raf(tick);s.every(480,schedule);s.every(1300,()=>{if(queue.length<4)spawn();});}};
+})();
+{const dlg=$('#roadmap');let rs=null;
+  $('#rmOpen').addEventListener('click',()=>{dlg.showModal();rs=scope();POOL.enter(rs);});
+  $('#rmClose').addEventListener('click',()=>dlg.close());
+  dlg.addEventListener('click',e=>{if(e.target===dlg)dlg.close();});
+  dlg.addEventListener('close',()=>{if(rs){rs.kill();rs=null;}});
+  POOL.scope=()=>rs||S;}
+
+/* ================= slide 14: verification suite ================= */
+const CC=[
+ ['Same workload, same output, every time','Run the same workload 3 times with a reset between runs. All 3 outputs must match, the reset must really clear state, and the engine must still report base.','c0_repeatable'],
+ ['A no-op edit stays bit-exact','Install an edit that keeps behavior. It must actually run, which the call counter shows, and leave output unchanged down to the bit.','c1_noop'],
+ ['A visible edit changes output on every rank','Install an edit that should change output. Output must change, and the call counter must fire on every GPU rank.','c2_visible'],
+ ['Live edits match a fresh process','The live-edited output, for one edit and for a chain of 3, must equal a brand-new process started from the edited files.','c3_fresh_equivalence'],
+ ['Undo restores output and code identity','Undo must return the output and every function’s identity, its hash and its code object, to base.','c4_uninstall'],
+ ['A fault mid-install rolls back every rank','Break an install partway through: one rank after 2 of 3 swaps, another during commit. Every rank must end at base, and rsibox must prove it.','c5_failed_install'],
+ ['Unsafe edits are refused before anything changes','Bad syntax, a changed closure, an edited module constant, or no real change at all. Each must be refused with the right reason, and nothing in the engine may change.','c6_refusal'],
+ ['Undo steps back through a chain of edits','Stack 3 edits, two of them on the same function. Each must run, and undoing them one at a time must bring back each earlier output exactly, ending at base.','c7_chain'],
+ ['Broken workers mark the sandbox poisoned','Crash, hang, lose or tamper with a worker. Each must mark the sandbox poisoned, block new installs, and respawn back to base.','c8_crash_and_hang'],
+ ['20 install and undo cycles stay stable','A stress test: 20 rounds of install and undo in a row. Output must be back at base at the end.','c9_soak'],
+ ['Startup-only edits are reported as not proven','An edit to code that only runs at startup installs fine, but its check must read proven: False with zero_witness, while a fresh process shows the edit does matter.','c10_not_proven']];
+$('#cgrid').innerHTML=CC.map(([t,tip,id],i)=>`<div class="cc" tabindex="0" aria-label="Rule ${i+1}: ${t}. ${tip}"><span class="rn">Rule ${i+1}</span><span>${t}</span><span class="ok" aria-hidden="true">✓</span><span class="tip" aria-hidden="true">${tip}<small>Suite case ${id}</small></span></div>`).join('');
+async function suite(s){const cs=$$('#cgrid .cc');cs.forEach(c=>c.classList.remove('lit'));for(const c of cs){await s.wait(reduce?5:190);c.classList.add('lit');}}
+$('#cRun').addEventListener('click',()=>suite(S.child('c')));
+sims['verified']={enter(s){s.wait(700).then(()=>suite(s.child('c')));}};
+
+/* ================= slide 15: orbit ================= */
+const ORB=[['vLLM','serving'],['SGLang','serving'],['TRT-LLM','serving'],['Transformers','inference'],['Megatron-LM','training'],['FastVideo','video'],['veRL','RL'],['miles','RL'],['TorchTitan','training'],['NeMo-RL','RL']];
+const orbit=$('#orbit');
+ORB.forEach(([n,c])=>{const e=document.createElement('span');e.className='eng';e.innerHTML=`${n}<small>${c}</small>`;orbit.appendChild(e);});
+const orbEls=$$('.eng',orbit);let orbA=0,orbPause=false;
+orbit.addEventListener('pointerenter',()=>orbPause=true);orbit.addEventListener('pointerleave',()=>orbPause=false);
+function placeOrbit(){const w=orbit.clientWidth,h=orbit.clientHeight;
+  orbEls.forEach((e,i)=>{const a=orbA+i/ORB.length*Math.PI*2;const dz=Math.sin(a);const ew=e.offsetWidth,eh=e.offsetHeight;
+    const x=w/2+Math.cos(a)*(w/2-ew/2-4)-ew/2,y=h/2+dz*(h*.36)-eh/2;const sc=.8+.28*(dz+1)/2;
+    e.style.transform=`translate(${x.toFixed(1)}px,${y.toFixed(1)}px) scale(${sc.toFixed(3)})`;e.style.opacity=(.5+.5*(dz+1)/2).toFixed(2);e.style.zIndex=dz>0?3:1;});}
+sims['fits-in']={enter(s){placeOrbit();if(!reduce)s.raf(dt=>{if(!orbPause)orbA+=dt/1000*.16;placeOrbit();});}};
+addEventListener('resize',placeOrbit);
+
+/* ================= slide 16: quick start ================= */
+const TERM=[['c','# 1. Start a warm vLLM engine'],['p','CUDA_VISIBLE_DEVICES=0 rsibox up --launcher local --lab vllm --real \\'],['x','    --state /tmp/rsibox-vllm --env RSIBOX_VLLM_MODEL=Qwen/Qwen3-8B'],['c',''],['c','# 2. Wait until warm, then edit in place'],['p','export RSIBOX=/tmp/rsibox-vllm/box.json'],['p','rsibox wait'],['p','rsibox source vllm.v1.worker.gpu.sample.sampler > /tmp/sampler.py'],['p','rsibox install --file vllm.v1.worker.gpu.sample.sampler=/tmp/sampler.py'],['p','rsibox check      # the edited path ran, output matches'],['p','rsibox uninstall  # journaled rollback to base'],['p','rsibox down --state /tmp/rsibox-vllm']];
+/* the full text, so the terminal can reserve its finished height before typing */
+const termFull=()=>TERM.map(([k,t])=>{if(k==='c')return `<span class="c">${esc(t)}</span>`;const cm=t.indexOf('  #');
+  return (k==='p'?'<span class="p">$ </span>':'')+esc(cm>0?t.slice(0,cm):t)+(cm>0?`<span class="c">${esc(t.slice(cm))}</span>`:'');}).join('\n')+'\n<span class="caret"></span>';
+function termSize(){const el=$('#term'),keep=el.innerHTML;el.style.height='';el.innerHTML=termFull();const h=el.offsetHeight;el.innerHTML=keep;el.style.height=h+'px';}
+addEventListener('resize',termSize);document.fonts?.ready.then(termSize);termSize();
+async function typeTerm(s){
+  const el=$('#term');let html='';termSize();
+  const render=(cur)=>{el.innerHTML=html+cur+'<span class="caret"></span>';};
+  for(const [k,t] of TERM){
+    const pre=k==='p'?'<span class="p">$ </span>':'';
+    if(k==='c'){html+=`<span class="c">${esc(t)}</span>\n`;render('');await s.wait(reduce?0:160);continue;}
+    const cm=t.indexOf('  #');const body=cm>0?t.slice(0,cm):t,tail=cm>0?t.slice(cm):'';
+    for(let i=1;i<=body.length;i+=reduce?body.length:2){render(pre+esc(body.slice(0,i)));await s.wait(reduce?0:14);}
+    html+=pre+esc(body)+(tail?`<span class="c">${esc(tail)}</span>`:'')+'\n';render('');await s.wait(reduce?0:180);
+  }
+}
+$('#termReplay').addEventListener('click',()=>typeTerm(S.child('t')));
+$('#copyPrompt').addEventListener('click',()=>{const txt=$('#agentPrompt').textContent;const msg=$('#copyMsg');
+  const sel=()=>{const r=document.createRange();r.selectNodeContents($('#agentPrompt'));const g=getSelection();g.removeAllRanges();g.addRange(r);msg.textContent='Selected. Press Ctrl+C or ⌘C to copy.';};
+  try{navigator.clipboard.writeText(txt).then(()=>{msg.textContent='Copied to clipboard.';},sel);}catch(e){sel();}});
+$('#copyCite').addEventListener('click',()=>{const txt=$('#bib').textContent;const msg=$('#citeMsg');
+  const sel=()=>{const r=document.createRange();r.selectNodeContents($('#bib'));const g=getSelection();g.removeAllRanges();g.addRange(r);msg.textContent='Selected. Press Ctrl+C or ⌘C to copy.';};
+  try{navigator.clipboard.writeText(txt).then(()=>{msg.textContent='Copied.';},sel);}catch(e){sel();}});
+sims['quick-start']={enter(s){$('#copyMsg').textContent='';$('#citeMsg').textContent='';s.wait(700).then(()=>typeTerm(s.child('t')));}};
+
+/* ---------- boot: content above a deep link grows once built, so re-anchor ---------- */
+(()=>{const id=location.hash.slice(1);const el=id&&document.getElementById(id);if(!el)return;
+  const go=()=>{if(!userScrolledByHand)el.scrollIntoView({behavior:'instant',block:'start'});};let userScrolledByHand=false;
+  ['wheel','touchstart','keydown'].forEach(t=>addEventListener(t,()=>{userScrolledByHand=true;},{once:true,passive:true}));
+  requestAnimationFrame(go);document.fonts?.ready.then(go);addEventListener('load',go,{once:true});})();
+})();
+</script>
+</body>
+</html>

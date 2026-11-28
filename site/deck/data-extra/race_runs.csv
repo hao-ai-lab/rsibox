@@ -1,0 +1,163 @@
+workload,arm,run,main,point,t_h,value
+t2va,codex,Baseline,yes,0,0.1641,1.16149
+t2va,codex,Baseline,yes,1,0.5563,1.1894
+t2va,codex,Baseline,yes,2,0.7084,1.22613
+t2va,codex,Baseline,yes,3,0.8804,1.23827
+t2va,codex,Baseline,yes,4,1.0765,1.26401
+t2va,codex,Baseline,yes,5,1.2406,1.31738
+t2va,codex,Baseline,yes,6,1.5808,1.39118
+t2va,codex,Baseline,yes,7,1.8049,1.42736
+t2va,codex,Baseline,yes,8,1.981,1.49009
+t2va,codex,Baseline,yes,9,2.5093,1.51471
+t2va,codex,Baseline,yes,10,2.8294,1.58324
+t2va,codex,Baseline,yes,11,3.4777,1.64575
+t2va,codex,Baseline,yes,12,4.1861,1.67901
+t2va,codex,Baseline,yes,13,4.4502,1.75962
+t2va,codex,Baseline,yes,14,5.0945,1.77614
+t2va,codex,Baseline,yes,15,5.3067,1.80601
+t2va,codex,Baseline,yes,16,5.991,1.82408
+t2va,codex,Baseline,yes,17,6.4152,1.85995
+t2va,codex,Baseline,yes,18,6.6593,1.9011
+t2va,codex,Baseline,yes,19,7.928,1.90586
+t2va,codex,Baseline,yes,20,8.0,1.90586
+t2va,fastrsi,FastRSI,yes,0,0.1601,1.17172
+t2va,fastrsi,FastRSI,yes,1,0.5883,1.20764
+t2va,fastrsi,FastRSI,yes,2,0.7604,1.2336
+t2va,fastrsi,FastRSI,yes,3,0.9405,1.30944
+t2va,fastrsi,FastRSI,yes,4,1.0245,1.33757
+t2va,fastrsi,FastRSI,yes,5,1.1046,1.37963
+t2va,fastrsi,FastRSI,yes,6,1.5768,1.45569
+t2va,fastrsi,FastRSI,yes,7,1.8409,1.50855
+t2va,fastrsi,FastRSI,yes,8,2.077,1.5581
+t2va,fastrsi,FastRSI,yes,9,2.2091,1.59272
+t2va,fastrsi,FastRSI,yes,10,2.3772,1.62175
+t2va,fastrsi,FastRSI,yes,11,2.6533,1.66447
+t2va,fastrsi,FastRSI,yes,12,2.9775,1.736
+t2va,fastrsi,FastRSI,yes,13,3.1856,1.78383
+t2va,fastrsi,FastRSI,yes,14,3.6218,1.79866
+t2va,fastrsi,FastRSI,yes,15,3.8019,1.80563
+t2va,fastrsi,FastRSI,yes,16,4.07,1.8222
+t2va,fastrsi,FastRSI,yes,17,4.4982,1.82829
+t2va,fastrsi,FastRSI,yes,18,5.1506,1.86734
+t2va,fastrsi,FastRSI,yes,19,5.7709,1.91838
+t2va,fastrsi,FastRSI,yes,20,6.5993,1.93188
+t2va,fastrsi,FastRSI,yes,21,7.5238,1.93679
+t2va,fastrsi,FastRSI,yes,22,7.6838,1.95029
+t2va,fastrsi,FastRSI,yes,23,8.0,1.95029
+sglang,rsibox,rsibox r2,yes,0,0.0,1.0
+sglang,rsibox,rsibox r2,yes,1,0.1033,1.029
+sglang,rsibox,rsibox r2,yes,2,0.2617,1.094
+sglang,rsibox,rsibox r2,yes,3,0.7217,1.123
+sglang,rsibox,rsibox r2,yes,4,0.9817,1.149
+sglang,rsibox,rsibox r2,yes,5,1.39,1.342
+sglang,rsibox,rsibox r2,yes,6,1.4783,1.433
+sglang,rsibox,rsibox r2,yes,7,1.6933,1.471
+sglang,rsibox,rsibox r2,yes,8,1.78,1.513
+sglang,rsibox,rsibox r2,yes,9,2.2833,1.551
+sglang,rsibox,rsibox r2,yes,10,2.4733,1.588
+sglang,rsibox,rsibox r2,yes,11,3.17,1.651
+sglang,rsibox,rsibox r2,yes,12,3.7683,1.687
+sglang,rsibox,rsibox r2,yes,13,4.5567,1.726
+sglang,rsibox,rsibox r2,yes,14,5.2,1.765
+sglang,rsibox,rsibox r3,no,0,0.0,1.0
+sglang,rsibox,rsibox r3,no,1,0.0567,1.021
+sglang,rsibox,rsibox r3,no,2,0.215,1.06
+sglang,rsibox,rsibox r3,no,3,0.2367,1.093
+sglang,rsibox,rsibox r3,no,4,0.315,1.12
+sglang,rsibox,rsibox r3,no,5,0.4633,1.146
+sglang,rsibox,rsibox r3,no,6,0.6117,1.18
+sglang,rsibox,rsibox r3,no,7,2.1117,1.205
+sglang,rsibox,rsibox r3,no,8,2.545,1.231
+sglang,rsibox,rsibox r3,no,9,3.2517,1.257
+sglang,rsibox,rsibox r3,no,10,4.515,1.283
+sglang,rsibox,rsibox r3,no,11,5.285,1.314
+sglang,codex,Baseline r2,yes,0,0.0,1.0
+sglang,codex,Baseline r2,yes,1,0.2117,1.036
+sglang,codex,Baseline r2,yes,2,0.2483,1.084
+sglang,codex,Baseline r2,yes,3,0.3617,1.108
+sglang,codex,Baseline r2,yes,4,0.705,1.135
+sglang,codex,Baseline r2,yes,5,0.8117,1.16
+sglang,codex,Baseline r2,yes,6,1.3617,1.186
+sglang,codex,Baseline r2,yes,7,1.5017,1.212
+sglang,codex,Baseline r2,yes,8,1.6367,1.24
+sglang,codex,Baseline r2,yes,9,2.1967,1.273
+sglang,codex,Baseline r2,yes,10,2.5867,1.305
+sglang,codex,Baseline r2,yes,11,4.1633,1.342
+sglang,codex,Baseline r2,yes,12,4.6167,1.372
+sglang,codex,Baseline r3,no,0,0.0,1.0
+sglang,codex,Baseline r3,no,1,0.1117,1.028
+sglang,codex,Baseline r3,no,2,0.1617,1.08
+sglang,codex,Baseline r3,no,3,0.205,1.11
+sglang,codex,Baseline r3,no,4,0.2617,1.134
+sglang,codex,Baseline r3,no,5,0.4517,1.177
+sglang,codex,Baseline r3,no,6,1.2783,1.219
+sglang,codex,Baseline r3,no,7,2.4167,1.256
+sglang,codex,Baseline r3,no,8,2.8717,1.282
+sglang,codex,Baseline r3,no,9,3.375,1.318
+sglang,codex,Baseline r3,no,10,5.415,1.347
+miles,rsibox,rsibox r2,yes,0,0.0,1.0
+miles,rsibox,rsibox r2,yes,1,0.165,1.058
+miles,rsibox,rsibox r2,yes,2,0.3367,1.127
+miles,rsibox,rsibox r2,yes,3,0.4267,1.19
+miles,rsibox,rsibox r2,yes,4,0.81,1.245
+miles,rsibox,rsibox r2,yes,5,1.3067,1.341
+miles,rsibox,rsibox r2,yes,6,1.4317,1.473
+miles,rsibox,rsibox r2,yes,7,1.6283,1.659
+miles,rsibox,rsibox r2,yes,8,1.815,1.999
+miles,rsibox,rsibox r2,yes,9,2.49,2.066
+miles,rsibox,rsibox r2,yes,10,3.1283,2.345
+miles,rsibox,rsibox r2,yes,11,3.2133,2.428
+miles,rsibox,rsibox r2,yes,12,3.45,2.514
+miles,rsibox,rsibox r2,yes,13,4.45,2.635
+miles,rsibox,rsibox r2,yes,14,5.3383,2.729
+miles,rsibox,rsibox r1,no,0,0.0,1.0
+miles,rsibox,rsibox r1,no,1,0.1367,1.029
+miles,rsibox,rsibox r1,no,2,0.22,1.073
+miles,rsibox,rsibox r1,no,3,0.375,1.12
+miles,rsibox,rsibox r1,no,4,0.5033,1.198
+miles,rsibox,rsibox r1,no,5,0.7267,1.23
+miles,rsibox,rsibox r1,no,6,1.3117,1.275
+miles,rsibox,rsibox r1,no,7,1.4683,1.443
+miles,rsibox,rsibox r1,no,8,2.145,1.5
+miles,rsibox,rsibox r1,no,9,2.225,1.555
+miles,rsibox,rsibox r1,no,10,2.28,1.604
+miles,rsibox,rsibox r1,no,11,2.36,1.654
+miles,rsibox,rsibox r1,no,12,2.975,2.034
+miles,rsibox,rsibox r1,no,13,3.8583,2.107
+miles,rsibox,rsibox r1,no,14,4.24,2.302
+miles,rsibox,rsibox r1,no,15,4.3233,2.379
+miles,rsibox,rsibox r1,no,16,4.7033,2.453
+miles,rsibox,rsibox r1,no,17,5.2917,2.562
+miles,codex,Baseline r3,yes,0,0.0,1.0
+miles,codex,Baseline r3,yes,1,0.1283,1.084
+miles,codex,Baseline r3,yes,2,0.225,1.118
+miles,codex,Baseline r3,yes,3,0.3133,1.172
+miles,codex,Baseline r3,yes,4,0.7967,1.213
+miles,codex,Baseline r3,yes,5,1.4283,1.249
+miles,codex,Baseline r3,yes,6,1.7017,1.31
+miles,codex,Baseline r3,yes,7,1.8767,1.338
+miles,codex,Baseline r3,yes,8,2.7067,1.489
+miles,codex,Baseline r3,yes,9,3.2367,1.61
+miles,codex,Baseline r3,yes,10,3.49,1.687
+miles,codex,Baseline r3,yes,11,3.6333,1.786
+miles,codex,Baseline r3,yes,12,4.1167,1.907
+miles,codex,Baseline r3,yes,13,4.315,2.19
+miles,codex,Baseline r3,yes,14,4.4267,2.241
+miles,codex,Baseline r3,yes,15,4.6467,2.37
+miles,codex,Baseline r3,yes,16,4.8383,2.439
+miles,codex,Baseline r3,yes,17,5.7983,2.489
+miles,codex,Baseline r4,no,0,0.0,1.0
+miles,codex,Baseline r4,no,1,0.2033,1.066
+miles,codex,Baseline r4,no,2,0.2883,1.167
+miles,codex,Baseline r4,no,3,0.535,1.237
+miles,codex,Baseline r4,no,4,0.8883,1.326
+miles,codex,Baseline r4,no,5,1.3467,1.369
+miles,codex,Baseline r4,no,6,1.6267,1.446
+miles,codex,Baseline r4,no,7,2.2733,1.522
+miles,codex,Baseline r4,no,8,2.445,1.624
+miles,codex,Baseline r4,no,9,2.7783,1.694
+miles,codex,Baseline r4,no,10,3.6867,1.794
+miles,codex,Baseline r4,no,11,3.7633,1.873
+miles,codex,Baseline r4,no,12,4.3117,2.324
+miles,codex,Baseline r4,no,13,5.31,2.465
+miles,codex,Baseline r4,no,14,5.8,2.558
