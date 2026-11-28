@@ -1,0 +1,40 @@
+name: rsibox.fastrsi.ai
+
+# Publishes site/deck/ (the interactive RSIBox website) to GitHub Pages.
+# Custom domain: rsibox.fastrsi.ai (site/deck/CNAME, plus the repo's Pages setting).
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "site/deck/**"
+      - "site/landing/dash/data/**"
+      - ".github/workflows/pages.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+concurrency:
+  group: pages
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/configure-pages@v5
+      # site/deck/data links to site/landing/dash/data; -L copies the real CSVs into the site.
+      - name: Assemble the site
+        run: cp -RL site/deck _site
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: _site
+      - id: deployment
+        uses: actions/deploy-pages@v4
