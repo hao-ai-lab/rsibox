@@ -1,7 +1,6 @@
-name: rsibox.fastrsi.ai
+name: Publish the website to GitHub Pages
 
-# Publishes site/deck/ (the interactive RSIBox website) to GitHub Pages.
-# Custom domain: rsibox.fastrsi.ai (site/deck/CNAME, plus the repo's Pages setting).
+# Publishes site/deck/ (the interactive RSIBox website) to https://hao-ai-lab.github.io/rsibox/.
 
 on:
   push:

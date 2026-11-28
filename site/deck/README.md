@@ -1,4 +1,4 @@
-# rsibox.fastrsi.ai
+# RSIBox website
 
 The interactive RSIBox website: one static page (`index.html`, inline CSS and JS, no build step).
 Each section is a small live demo of one mechanism: hot-reload, tier routing, the edit lifecycle,
@@ -32,12 +32,10 @@ Baseline), taken from the race records the blog figure was drawn from.
 
 ## Deploy
 
-`.github/workflows/pages.yml` publishes this folder to GitHub Pages on every push to `main`
-that touches `site/deck/`. The custom domain is `rsibox.fastrsi.ai`:
-
-1. Repo settings, Pages: source "GitHub Actions", custom domain `rsibox.fastrsi.ai`, enforce HTTPS.
-2. DNS (Cloudflare, zone `fastrsi.ai`): `CNAME rsibox -> hao-ai-lab.github.io`, proxy off (DNS only)
-   until GitHub has issued the certificate.
+`.github/workflows/pages.yml` publishes this folder to the repository's GitHub Pages site,
+<https://hao-ai-lab.github.io/rsibox/>, on every push to `main` that touches `site/deck/` or its
+data. The repository's Pages source is "GitHub Actions". There is no custom domain. Paths in the
+site are relative, so it works under the `/rsibox/` prefix and from a local static server.
 
 ## Rules
 
